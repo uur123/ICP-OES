@@ -5,7 +5,7 @@ import numpy as np
 import plotly.express as px
 import re
 
-# Element to oxide conversion dictionary (B to U)
+# Extended oxide conversion dictionary (B to U)
 element_to_oxide = {
     'Ag': ('Ag2O', 1.0741), 'Al': ('Al2O3', 1.8895), 'As': ('As2O3', 1.3203), 'Au': ('Au2O3', 1.1218),
     'B': ('B2O3', 3.2199), 'Ba': ('BaO', 1.1165), 'Bi': ('Bi2O3', 1.1148), 'Br': ('Br', 1.0),
@@ -28,22 +28,11 @@ element_to_oxide = {
     'Zn': ('ZnO', 1.2448), 'Zr': ('ZrO2', 1.3508)
 }
 
-st.set_page_config(page_title="ICP-OES Result Calculator", layout="wide")
+st.set_page_config(page_title="ICP-OES Smart Calculator", layout="wide")
+st.title("🧪 Custom ICP-OES Result Calculator")
 
-# --- SIDEBAR ---
-with st.sidebar:
-    st.header("1. Default Global Parameters")
-    def_vol = st.number_input("Default Volume (mL)", min_value=0.0, value=50.0)
-    def_mass = st.number_input("Default Mass (g)", min_value=0.0, value=0.1)
-    st.divider()
-    st.header("2. Additional Matrix Data")
-    moist = st.number_input("Moisture (%)", min_value=0.0)
-    loi_val = st.number_input("LOI (%)", min_value=0.0)
-
-st.title("🧪 Advanced ICP-OES Result Calculator")
-
-# --- DATA PASTE ---
-st.header("3. Data Input")
+# --- STEP 1: PASTE DATA ---
+st.header("1. Data Input")
 raw_data = st.text_area("Paste Excel data (headers + unit row):", height=150)
 
 if raw_data:
@@ -59,7 +48,7 @@ if raw_data:
         # SKIP CONTROL ROWS
         df_filtered = df_input[~df_input['Sample'].str.contains('Control', case=False, na=False)].copy()
 
-        # Clean symbols and convert to numbers
+        # Clean symbols and parse numbers
         limit_flags = []
         for col in df_filtered.columns:
             if col != 'Sample':
@@ -71,33 +60,40 @@ if raw_data:
                 df_filtered[col] = df_filtered.apply(lambda r: clean_and_tag(r[col], r['Sample'], col), axis=1)
                 df_filtered[col] = pd.to_numeric(df_filtered[col], errors='coerce')
 
-        # AUTO-DILUTION & PARAMETER EDITOR
-        st.subheader("4. Per-Sample Dilution & Prep")
+        # PER-SAMPLE PREP TABLE (Includes Mass, Volume, Moisture, LOI)
+        st.subheader("2. Per-Sample Preparation & Dilution")
         def get_auto_dilution(name):
             match = re.search(r'(\d+)[xX]', str(name))
             return float(match.group(1)) if match else 1.0
 
+        samples = df_filtered['Sample'].unique()
         prep_df = pd.DataFrame({
-            'Sample': df_filtered['Sample'].unique(),
-            'Mass (g)': [def_mass] * len(df_filtered['Sample'].unique()),
-            'Volume (mL)': [def_vol] * len(df_filtered['Sample'].unique()),
-            'Dilution': [get_auto_dilution(s) for s in df_filtered['Sample'].unique()]
+            'Sample': samples,
+            'Mass (g)': [0.1] * len(samples),
+            'Volume (mL)': [50.0] * len(samples),
+            'Dilution': [get_auto_dilution(s) for s in samples],
+            'Moisture (%)': [0.0] * len(samples),
+            'LOI (%)': [0.0] * len(samples)
         })
         
-        edited_prep = st.data_editor(prep_df, hide_index=True)
+        edited_prep = st.data_editor(prep_df, hide_index=True, use_container_width=True)
         prep_map = edited_prep.set_index('Sample').to_dict('index')
 
         # Element Configuration
         detected = sorted([e for e in element_to_oxide.keys() if any(c.strip().startswith(f"{e} ") for c in df_filtered.columns)])
-        st.subheader("5. Output Configuration")
+        st.subheader("3. Select Oxide/Elemental Display")
         config_cols = st.columns(min(len(detected), 8) if detected else 1)
         element_modes = {e: config_cols[i % 8].radio(f"**{e}**", ["Elem", "Oxide"], key=f"m_{e}") for i, e in enumerate(detected)}
 
+        # Measurement Notes
+        st.subheader("4. Measurement Notes")
+        meas_notes = st.text_area("Add internal notes about this measurement run:", "Standard ICP-OES run.")
+
         # PROCESS RESULTS
-        results, sd_details, highlights = [], [], {}
+        results, sd_details, highlights, sd_highlights = [], [], {}, {}
         for _, row in df_filtered.iterrows():
             s_name = row['Sample']
-            p = prep_map.get(s_name, {'Mass (g)': def_mass, 'Volume (mL)': def_vol, 'Dilution': 1.0})
+            p = prep_map.get(s_name, {'Mass (g)': 0.3, 'Volume (mL)': 250.0, 'Dilution': 1.0, 'Moisture (%)': 0.0, 'LOI (%)': 0.0})
             res, sd_res, row_total = {"Sample": s_name}, {"Sample": s_name}, 0.0
 
             for elem in detected:
@@ -118,46 +114,45 @@ if raw_data:
                     sd_res[f"{label} SD"] = sd_perc
                     row_total += perc
                     
-                    key = (s_name, f"{label} (%)")
-                    if any((s_name, c) in limit_flags for c in m_cols): highlights[key] = 'background-color: #ffffb3'
-                    if perc > 0 and (sd_perc / perc) > 0.10: highlights[key] = 'background-color: #ffcc99'
+                    # Highlight logic
+                    key_res = (s_name, f"{label} (%)")
+                    key_sd = (s_name, f"{label} SD")
+                    if any((s_name, c) in limit_flags for c in m_cols):
+                        highlights[key_res] = 'background-color: #ffffb3'
+                    if perc > 0 and (sd_perc / perc) > 0.10:
+                        highlights[key_res] = 'background-color: #ffcc99'
+                        sd_highlights[key_sd] = 'background-color: #ff9999; color: black; font-weight: bold'
 
-            res.update({"Moisture (%)": moist, "LOI (%)": loi_val, "Total (%)": row_total + moist + loi_val})
+            res.update({"Moisture (%)": p['Moisture (%)'], "LOI (%)": p['LOI (%)'], "Total (%)": row_total + p['Moisture (%)'] + p['LOI (%)']})
             results.append(res); sd_details.append(sd_res)
 
-        # ANALYSIS VIEWS
-        st.header("6. Analysis View")
-        tab1, tab2, tab3 = st.tabs(["📊 Results", "📏 SD Details", "🥧 Charts"])
+        # FINAL ANALYSIS
+        st.header("5. Results & Visualization")
+        tab1, tab2, tab3 = st.tabs(["📊 Main Results", "📏 SD Details (Verification)", "🥧 Sample Charts"])
         
         with tab1:
             df_final = pd.DataFrame(results)
-            st.dataframe(df_final.style.format(precision=3).apply(lambda s: [highlights.get((s.Sample, col), '') for col in s.index], axis=1), use_container_width=True)
-            st.info("💡 **Yellow**: Includes < or > values. **Orange**: High wavelength deviation (>10%).")
+            st.dataframe(df_final.style.format(precision=3).apply(lambda s: [highlights.get((s.Sample, c), '') for c in s.index], axis=1), use_container_width=True)
+            st.info("💡 **Yellow**: Near detection limit. **Orange**: High wavelength deviation (check SD).")
         
         with tab2:
-            st.dataframe(pd.DataFrame(sd_details).style.format(precision=4), use_container_width=True)
+            st.write("Wavelength standard deviations. **Red** flags indicate significantly weird data consistency.")
+            df_sd = pd.DataFrame(sd_details)
+            st.dataframe(df_sd.style.format(precision=4).apply(lambda s: [sd_highlights.get((s.Sample, c), '') for c in s.index], axis=1), use_container_width=True)
 
         with tab3:
-            st.write("Composition breakdown per sample (includes individual dilutions):")
-            for sample_res in results:
-                # Filter out metadata like 'Total' and 'Sample name' for the chart
-                chart_labels = [k for k in sample_res.keys() if k not in ['Sample', 'Total (%)']]
-                chart_values = [sample_res[k] for k in chart_labels]
-                
-                # Check if there is data to plot
-                if sum(chart_values) > 0:
-                    fig = px.pie(values=chart_values, names=chart_labels, title=f"Sample: {sample_res['Sample']}")
-                    st.plotly_chart(fig, use_container_width=True)
-                else:
-                    st.warning(f"No positive values to plot for {sample_res['Sample']}.")
+            for s_res in results:
+                plot_vals = {k: v for k, v in s_res.items() if k not in ['Sample', 'Total (%)']}
+                if sum(plot_vals.values()) > 0:
+                    st.plotly_chart(px.pie(values=list(plot_vals.values()), names=list(plot_vals.keys()), title=f"Sample: {s_res['Sample']}"), use_container_width=True)
+
+        # Download with Notes
+        final_csv_str = df_final.to_csv(index=False)
+        full_output = f"NOTE: {meas_notes}\n\n" + final_csv_str
+        st.download_button("Download Results + Notes", full_output, "icp_final_report.csv", "text/csv")
 
     except Exception as e:
         st.error(f"Error: {e}")
 
 st.divider()
-st.subheader("📝 Method & Developer Information")
-st.markdown("""
-**Sample Prep:** Dried, milled, and acid-digested. Individual dilutions handled per sample.  
-**Measurement:** ICP-OES measurement.
-""")
-st.info(f"**Developer:** [Your Name](https://linkedin.com)")
+#st.info(f"**Developer:** [Your Name](https://linkedin.com)")
