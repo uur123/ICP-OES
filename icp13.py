@@ -33,73 +33,89 @@ st.title("🧪 Clean Multi-Block ICP-OES Calculator")
 
 # --- 1. DATA INPUT ---
 st.header("1. Paste Data")
-raw_pasted_text = st.text_area("Paste your multi-block Excel data here:", height=200)
+raw_pasted_text = st.text_area("Paste your Excel data here:", height=200, 
+                              placeholder="Sample\t\tAl 167.078\t...\ntap water\t\t1.234\t...")
 
-def parse_data_safely(text):
-    # Split text into blocks where "Sample" starts the line
-    blocks = re.split(r'(?m)^Sample', text)
-    master_data = {} # {sample_name: {column_name: value}}
+def parse_and_merge_blocks(text):
+    # Split the paste into sections whenever the word "Sample" appears
+    raw_blocks = re.split(r'(?i)Sample', text)
+    master_dict = {} # {sample_name: {element_col: value}}
     
-    for block in blocks:
+    for block in raw_blocks:
         if not block.strip(): continue
         
-        # Load block CSV safely
-        f = io.StringIO("Sample" + block.strip())
-        df = pd.read_csv(f, sep=None, engine='python').dropna(axis=1, how='all')
+        # Build a temporary CSV string
+        clean_block = "Sample" + block.strip()
+        df = pd.read_csv(io.StringIO(clean_block), sep='\t').dropna(axis=1, how='all')
         
-        # Filter: Skip unit rows (mg/l), literal "Sample" text, and "Control"
-        df = df[df.iloc[:,0].notna()]
-        df = df[~df.iloc[:,0].astype(str).str.lower().str.contains('mg/l|sample|control|unit', na=False)]
+        # Safety: Force the first column to be named 'Sample'
+        df.columns = ['Sample'] + list(df.columns[1:])
         
-        # Add to master dictionary
+        # Clean: Remove Unit rows (mg/l), literal "Sample" text, and "Control"
+        df = df[df['Sample'].notna()]
+        df = df[~df['Sample'].astype(str).str.lower().str.contains('mg/l|sample|control|unit', na=False)]
+        
+        # Map element values to the sample name
         for _, row in df.iterrows():
             s_name = str(row['Sample']).strip()
-            if s_name not in master_data:
-                master_data[s_name] = {}
-            # Add element columns to this sample's data
+            if s_name not in master_dict:
+                master_dict[s_name] = {}
             for col in df.columns:
                 if col != 'Sample':
-                    master_data[s_name][col] = row[col]
+                    master_dict[s_name][col] = row[col]
                     
-    if not master_data: return None
-    return pd.DataFrame.from_dict(master_data, orient='index').rename_axis('Sample').reset_index()
+    if not master_dict: return None
+    # Convert dictionary back to a single flat DataFrame
+    return pd.DataFrame.from_dict(master_dict, orient='index').rename_axis('Sample').reset_index()
 
 if raw_pasted_text:
     try:
-        df_full = parse_data_safely(raw_pasted_text)
+        df_full = parse_and_merge_blocks(raw_pasted_text)
         
         if df_full is not None:
-            # Clean numerics and detect < / >
+            # Numeric cleaning & flag limits (<, >)
             limit_flags = []
             for col in df_full.columns:
                 if col != 'Sample':
-                    def clean_val(val, sample, cname):
+                    def clean_numeric(val, sample, cname):
                         s = str(val)
                         if any(x in s for x in ['<', '>']):
                             limit_flags.append((sample, cname))
                             return s.replace('<', '').replace('>', '').strip()
                         return val
-                    df_full[col] = df_full.apply(lambda r: clean_val(r[col], r['Sample'], col), axis=1)
+                    df_full[col] = df_full.apply(lambda r: clean_numeric(r[col], r['Sample'], col), axis=1)
                     df_full[col] = pd.to_numeric(df_full[col], errors='coerce')
 
-            # --- 2. SAMPLE PREP ---
-            st.subheader("2. Sample Preparation")
-            def get_dil(name):
+            # --- 2. PER-SAMPLE PREPARATION ---
+            st.subheader("2. Sample Preparation & Parameters")
+            def get_auto_dil(name):
                 m = re.search(r'(\d+)\s?[xX]', str(name))
                 return float(m.group(1)) if m else 1.0
 
             s_list = df_full['Sample'].unique()
-            p_df = pd.DataFrame({'Sample': s_list, 'Mass (g)': 0.5, 'Vol (mL)': 500.0, 'Dilution': [get_dil(s) for s in s_list], 'Moisture (%)': 0.0, 'LOI (%)': 0.0})
+            # Default Vol 500mL, Mass 0.5g
+            p_df = pd.DataFrame({
+                'Sample': s_list, 
+                'Mass (g)': 0.5, 
+                'Vol (mL)': 500.0, 
+                'Dilution': [get_auto_dil(s) for s in s_list], 
+                'Moisture (%)': 0.0, 
+                'LOI (%)': 0.0
+            })
             e_prep = st.data_editor(p_df, hide_index=True, use_container_width=True)
             p_map = e_prep.set_index('Sample').to_dict('index')
 
             # --- 3. ELEMENT CONFIG ---
             detected = sorted([e for e in element_to_oxide.keys() if any(c.strip().startswith(f"{e} ") for c in df_full.columns)])
-            st.subheader("3. Oxide/Elemental Settings")
-            c_cols = st.columns(min(len(detected), 10) if detected else 1)
-            modes = {e: c_cols[i % 10].radio(f"**{e}**", ["Elem", "Oxide"], key=f"m_{e}") for i, e in enumerate(detected)}
+            st.subheader("3. Select Oxide/Elemental Mode")
+            c_modes = st.columns(min(len(detected), 10) if detected else 1)
+            modes = {e: c_modes[i % 10].radio(f"**{e}**", ["Elem", "Oxide"], key=f"m_{e}") for i, e in enumerate(detected)}
 
-            # --- 4. CALCULATIONS ---
+            # --- 4. MEASUREMENT NOTES ---
+            st.subheader("4. Measurement Notes")
+            user_notes = st.text_area("Notes for the final report:", "Multi-wavelength verification performed.")
+
+            # --- 5. CALCULATIONS ---
             results, sd_details, h_res, h_sd = [], [], {}, {}
             for _, row in df_full.iterrows():
                 sn = row['Sample']
@@ -112,7 +128,7 @@ if raw_pasted_text:
                     if len(vals) > 0:
                         av, sd = np.mean(vals), np.std(vals) if len(vals) > 1 else 0.0
                         f = (pm['Vol (mL)']/1000) * pm['Dilution'] / (pm['Mass (g)'] * 1000)
-                        perc, sd_perc = (av * f) * 100, (sd * f) * 100
+                        perc, sd_perc = (av * f) * 100, (std_v * f) if 'std_v' in locals() else (sd * f) * 100
                         
                         label = elem
                         if modes[elem] == "Oxide":
@@ -127,25 +143,28 @@ if raw_pasted_text:
                 res.update({"Moisture (%)": pm['Moisture (%)'], "LOI (%)": pm['LOI (%)'], "Total (%)": total_measured + pm['Moisture (%)'] + pm['LOI (%)']})
                 results.append(res); sd_details.append(sd_res)
 
-            # --- 5. RESULTS ---
-            st.header("4. Analysis View")
-            t1, t2, t3 = st.tabs(["📊 Results", "📏 SD", "🥧 Charts"])
+            # --- 6. DISPLAY ---
+            st.header("5. Analysis Results")
+            t1, t2, t3 = st.tabs(["📊 Main Results", "📏 SD Verification", "🥧 Visual Charts"])
             with t1:
                 df_f = pd.DataFrame(results)
                 st.dataframe(df_f.style.format(precision=3).apply(lambda r: [h_res.get((r.Sample, c), '') for c in r.index], axis=1), use_container_width=True)
+                st.info("💡 **Yellow**: Includes < or >. **Orange**: High deviation (>10%) between wavelengths.")
             with t2:
                 st.dataframe(pd.DataFrame(sd_details).style.format(precision=4).apply(lambda r: [h_sd.get((r.Sample, c), '') for c in r.index], axis=1), use_container_width=True)
             with t3:
-                for idx, r_row in enumerate(results):
+                for i, r_row in enumerate(results):
                     st.write(f"### {r_row['Sample']}")
                     c1, c2 = st.columns(2)
                     bk = {k: v for k, v in r_row.items() if k not in ['Sample', 'Total (%)']}
-                    c1.plotly_chart(px.pie(values=list(bk.values()), names=list(bk.keys()), title="Composition"), key=f"p1_{idx}")
+                    c1.plotly_chart(px.pie(values=list(bk.values()), names=list(bk.keys()), title="Internal Composition"), key=f"p1_{i}")
                     unk = max(0, 100 - r_row['Total (%)'])
-                    c2.plotly_chart(px.pie(values=[r_row['Total (%)'], unk], names=['Measured', 'Unknown'], title="Balance"), key=f"p2_{idx}")
+                    c2.plotly_chart(px.pie(values=[r_row['Total (%)'], unk], names=['Measured', 'Unknown'], title="Mass Balance"), key=f"p2_{i}")
 
-            st.download_button("Download CSV", df_f.to_csv(index=False).encode('utf-8'), "icp_report.csv", "text/csv")
+            full_csv = f"NOTES: {user_notes}\n\n" + df_f.to_csv(index=False)
+            st.download_button("Download Report", full_csv, "icp_final.csv", "text/csv")
     except Exception as e:
         st.error(f"Processing Error: {e}")
 
+st.divider()
 st.info(f"**Developer:** [Your Name](https://linkedin.com)")
