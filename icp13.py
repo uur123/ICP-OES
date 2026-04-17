@@ -5,7 +5,7 @@ import numpy as np
 import plotly.express as px
 import re
 
-# Element to oxide conversion dictionary (B to U)
+# Oxide conversion dictionary (B to U)
 element_to_oxide = {
     'Ag': ('Ag2O', 1.0741), 'Al': ('Al2O3', 1.8895), 'As': ('As2O3', 1.3203), 'Au': ('Au2O3', 1.1218),
     'B': ('B2O3', 3.2199), 'Ba': ('BaO', 1.1165), 'Bi': ('Bi2O3', 1.1148), 'Br': ('Br', 1.0),
@@ -37,38 +37,40 @@ raw_data = st.text_area("Paste Excel data here (Multiple 'Sample' blocks support
 
 if raw_data:
     try:
-        # Split data by 'Sample' keyword (handles leading whitespace/tabs)
+        # Split by keyword 'Sample' (case sensitive based on your screenshot)
         sections = [s.strip() for s in re.split(r'(?m)^Sample', raw_data) if s.strip()]
         dfs_to_merge = []
 
         for section in sections:
             full_sec = "Sample\t" + section
-            # Use sep=None with engine='python' to auto-detect tab or comma
             df_temp = pd.read_csv(io.StringIO(full_sec), sep=None, engine='python').dropna(axis=1, how='all')
             
-            # Unit row detection and removal
             if not df_temp.empty:
-                # Check first row of actual data for mg/l
+                # Remove mg/l unit row
                 if df_temp.iloc[0].astype(str).str.lower().str.contains('mg/l').any():
                     df_temp = df_temp.iloc[1:].reset_index(drop=True)
-            
-            # Standardize 'Sample' column and set as index for merging
-            df_temp['Sample'] = df_temp['Sample'].astype(str).str.strip()
-            dfs_to_merge.append(df_temp.set_index('Sample'))
+                
+                # Standardize Sample Column and set as index
+                df_temp.columns = [c.strip() for c in df_temp.columns]
+                df_temp['Sample'] = df_temp['Sample'].astype(str).str.strip()
+                dfs_to_merge.append(df_temp.set_index('Sample'))
 
-        # Join all tables together based on Sample index
+        # Combine tables: concat joins on index (Sample names)
         if dfs_to_merge:
-            df_merged = pd.concat(dfs_to_merge, axis=1).reset_index()
+            df_merged = pd.concat(dfs_to_merge, axis=1)
+            # Remove any duplicate column names if a wavelength was pasted twice
+            df_merged = df_merged.loc[:, ~df_merged.columns.duplicated()]
+            df_final_input = df_merged.reset_index()
         else:
-            st.error("Could not find any data blocks starting with 'Sample'.")
+            st.error("No valid data sections found. Ensure each block starts with 'Sample'.")
             st.stop()
 
-        # SANITIZATION: Filter out literal "Sample", "Control", or blank names
-        df_filtered = df_merged[df_merged['Sample'].notna()].copy()
+        # FILTER: Skip Control, Sample, or empty labels
+        df_filtered = df_final_input[df_final_input['Sample'].notna()].copy()
         df_filtered = df_filtered[~df_filtered['Sample'].str.lower().isin(['sample', 'control', 'nan', ''])]
-        df_filtered = df_filtered[~df_filtered['Sample'].str.contains('Control', case=False, na=False)].copy()
+        df_filtered = df_filtered[~df_filtered['Sample'].str.contains('Control', case=False, na=False)]
 
-        # Clean numerical values & flag limit symbols (<, >)
+        # Numeric cleaning & tagging limit symbols
         limit_flags = []
         for col in df_filtered.columns:
             if col != 'Sample':
@@ -156,5 +158,8 @@ if raw_data:
 
     except Exception as e:
         st.error(f"Processing Error: {e}")
+        with st.expander("Debug Raw Data Merge"):
+            st.write("If you see this, the tables failed to merge. Check if 'Sample' is spelled exactly the same in each block.")
+            if 'df_final_input' in locals(): st.dataframe(df_final_input)
 
 st.info(f"**Developer:** [Your Name](https://linkedin.com)")
