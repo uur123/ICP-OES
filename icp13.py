@@ -5,7 +5,7 @@ import numpy as np
 import plotly.express as px
 import re
 
-# Element to oxide conversion dictionary (B to U)
+# Oxide conversion dictionary (B to U)
 element_to_oxide = {
     'Ag': ('Ag2O', 1.0741), 'Al': ('Al2O3', 1.8895), 'As': ('As2O3', 1.3203), 'Au': ('Au2O3', 1.1218),
     'B': ('B2O3', 3.2199), 'Ba': ('BaO', 1.1165), 'Bi': ('Bi2O3', 1.1148), 'Br': ('Br', 1.0),
@@ -29,41 +29,42 @@ element_to_oxide = {
 }
 
 st.set_page_config(page_title="ICP-OES Smart Calculator", layout="wide")
-st.title("🧪 Multi-Table ICP-OES Result Calculator")
+st.title("🧪 Advanced Multi-Table ICP-OES Calculator")
 
-# --- DATA INPUT ---
+# --- 1. DATA INPUT ---
 st.header("1. Data Input")
-raw_data = st.text_area("Paste Excel data (Supports multiple 'Sample' sections):", height=200)
+raw_data = st.text_area("Paste Excel data here (Supports multiple 'Sample' sections):", height=200)
 
 if raw_data:
     try:
-        # Split data by the keyword 'Sample' to handle multiple table blocks
-        sections = re.split(r'(?m)^Sample\t?', raw_data)
-        all_dfs = []
+        # Split data by 'Sample' keyword to handle multiple blocks in one paste
+        sections = [s.strip() for s in re.split(r'(?m)^Sample', raw_data) if s.strip()]
+        dfs_to_merge = []
 
         for section in sections:
-            if not section.strip(): continue
-            # Reconstruct the header
-            full_section = "Sample\t" + section.strip()
-            df_temp = pd.read_csv(io.StringIO(full_section), sep='\t').dropna(axis=1, how='all')
+            full_sec = "Sample\t" + section
+            df_temp = pd.read_csv(io.StringIO(full_sec), sep='\t').dropna(axis=1, how='all')
             
-            # Clean mg/l unit row
+            # Remove mg/l unit row
             if not df_temp.empty and df_temp.iloc[0].astype(str).str.lower().str.contains('mg/l').any():
                 df_temp = df_temp.iloc[1:].reset_index(drop=True)
             
-            all_dfs.append(df_temp)
+            dfs_to_merge.append(df_temp)
 
-        # Merge all sections by Sample name
-        df_input = all_dfs[0]
-        for extra_df in all_dfs[1:]:
-            df_input = pd.merge(df_input, extra_df, on='Sample', how='outer')
+        # Merge all sections on 'Sample' name
+        if len(dfs_to_merge) > 1:
+            df_merged = dfs_to_merge[0]
+            for other_df in dfs_to_merge[1:]:
+                df_merged = pd.merge(df_merged, other_df, on='Sample', how='outer')
+        else:
+            df_merged = dfs_to_merge[0]
 
-        # FILTER: Skip "Sample", "Control", or empty names
-        df_filtered = df_input[df_input['Sample'].notna()].copy()
+        # Filter out "Control", "Sample" (literal), or empty rows
+        df_filtered = df_merged[df_merged['Sample'].notna()].copy()
         df_filtered = df_filtered[~df_filtered['Sample'].str.strip().str.lower().isin(['sample', 'control'])]
         df_filtered = df_filtered[~df_filtered['Sample'].str.contains('Control', case=False, na=False)]
 
-        # Numeric cleaning & Detection limit tagging
+        # Numeric cleaning & tagging limit symbols (<, >)
         limit_flags = []
         for col in df_filtered.columns:
             if col != 'Sample':
@@ -75,7 +76,7 @@ if raw_data:
                 df_filtered[col] = df_filtered.apply(lambda r: clean_tag(r[col], r['Sample'], col), axis=1)
                 df_filtered[col] = pd.to_numeric(df_filtered[col], errors='coerce')
 
-        # 2. PER-SAMPLE PARAMETERS (Default: 0.5g / 500mL)
+        # --- 2. PER-SAMPLE PARAMETERS ---
         st.subheader("2. Sample Preparation & Parameters")
         def auto_dil(name):
             match = re.search(r'(\d+)\s?[xX]', str(name))
@@ -84,22 +85,22 @@ if raw_data:
         samples = df_filtered['Sample'].unique()
         prep_df = pd.DataFrame({
             'Sample': samples, 'Mass (g)': [0.5]*len(samples), 'Vol (mL)': [500.0]*len(samples),
-            'Dilution': [auto_dil(s) for s in samples], 'Moist (%)': [0.0]*len(samples), 'LOI (%)': [0.0]*len(samples)
+            'Dilution': [auto_dil(s) for s in samples], 'Moisture (%)': [0.0]*len(samples), 'LOI (%)': [0.0]*len(samples)
         })
         edited_prep = st.data_editor(prep_df, hide_index=True, use_container_width=True)
         p_map = edited_prep.set_index('Sample').to_dict('index')
 
-        # 3. ELEMENT CONFIGURATION
+        # --- 3. ELEMENT CONFIG ---
         detected = sorted([e for e in element_to_oxide.keys() if any(c.strip().startswith(f"{e} ") for c in df_filtered.columns)])
-        st.subheader("3. Output Display (Oxide/Elemental)")
+        st.subheader("3. Select Oxide/Elemental Display")
         config_cols = st.columns(min(len(detected), 8) if detected else 1)
         modes = {e: config_cols[i % 8].radio(f"**{e}**", ["Elem", "Oxide"], key=f"m_{e}") for i, e in enumerate(detected)}
 
-        # CALCULATIONS
+        # --- CALCULATIONS ---
         results, sd_details, h_res, h_sd = [], [], {}, {}
         for _, row in df_filtered.iterrows():
             s = row['Sample']
-            p = p_map.get(s, {'Mass (g)':0.5, 'Vol (mL)':500.0, 'Dilution':1.0, 'Moist (%)':0.0, 'LOI (%)':0.0})
+            p = p_map.get(s, {'Mass (g)':0.5, 'Vol (mL)':500.0, 'Dilution':1.0, 'Moisture (%)':0.0, 'LOI (%)':0.0})
             res, sd_res, measured_total = {"Sample": s}, {"Sample": s}, 0.0
 
             for elem in detected:
@@ -123,34 +124,35 @@ if raw_data:
                         h_res[(s, f"{label} (%)")] = 'background-color: #ffcc99'
                         h_sd[(s, f"{label} SD")] = 'background-color: #ff9999'
 
-            res.update({"Moisture (%)": p['Moist (%)'], "LOI (%)": p['LOI (%)'], "Total (%)": measured_total + p['Moist (%)'] + p['LOI (%)']})
+            res.update({"Moisture (%)": p['Moisture (%)'], "LOI (%)": p['LOI (%)'], "Total (%)": measured_total + p['Moisture (%)'] + p['LOI (%)']})
             results.append(res); sd_details.append(sd_res)
 
-        # DISPLAY
-        st.header("4. Results")
-        t1, t2, t3 = st.tabs(["📊 Results", "📏 SD Verification", "🥧 Charts"])
+        # --- 4. DISPLAY ---
+        st.header("4. Results Analysis")
+        t1, t2, t3 = st.tabs(["📊 Results Table", "📏 Precision (SD)", "🥧 Visual Charts"])
         
         with t1:
             df_final = pd.DataFrame(results)
             st.dataframe(df_final.style.format(precision=3).apply(lambda r: [h_res.get((r.Sample, c), '') for c in r.index], axis=1), use_container_width=True)
+            st.info("💡 **Yellow**: Near detection limit. **Orange**: High wavelength deviation (>10%).")
         
         with t2:
             st.dataframe(pd.DataFrame(sd_details).style.format(precision=4).apply(lambda r: [h_sd.get((r.Sample, c), '') for c in r.index], axis=1), use_container_width=True)
 
         with t3:
-            for item in results:
+            for i, item in enumerate(results):
                 st.write(f"### {item['Sample']}")
                 c1, c2 = st.columns(2)
-                # Measured Components
+                # Chart 1: Composition breakdown
                 comp = {k: v for k, v in item.items() if k not in ['Sample', 'Total (%)']}
-                c1.plotly_chart(px.pie(values=list(comp.values()), names=list(comp.keys()), title="Measured Composition"), use_container_width=True)
-                # Measured vs Unknown
+                c1.plotly_chart(px.pie(values=list(comp.values()), names=list(comp.keys()), title="Internal Composition"), use_container_width=True, key=f"pie_comp_{i}")
+                # Chart 2: Mass Balance
                 unk = max(0, 100 - item['Total (%)'])
-                c2.plotly_chart(px.pie(values=[item['Total (%)'], unk], names=['Measured', 'Unknown'], title="Mass Balance"), use_container_width=True)
+                c2.plotly_chart(px.pie(values=[item['Total (%)'], unk], names=['Measured', 'Unknown'], title="Mass Balance"), use_container_width=True, key=f"pie_bal_{i}")
 
         st.download_button("Download Report", df_final.to_csv(index=False).encode('utf-8'), "icp_final.csv", "text/csv")
 
     except Exception as e:
-        st.error(f"Error processing data: {e}")
+        st.error(f"Processing Error: {e}")
 
 st.info(f"**Developer:** [Your Name](https://linkedin.com)")
