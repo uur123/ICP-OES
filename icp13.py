@@ -5,7 +5,7 @@ import numpy as np
 import plotly.express as px
 import re
 
-# Extended oxide conversion dictionary (B to U)
+# Element to oxide conversion dictionary (B to U)
 element_to_oxide = {
     'Ag': ('Ag2O', 1.0741), 'Al': ('Al2O3', 1.8895), 'As': ('As2O3', 1.3203), 'Au': ('Au2O3', 1.1218),
     'B': ('B2O3', 3.2199), 'Ba': ('BaO', 1.1165), 'Bi': ('Bi2O3', 1.1148), 'Br': ('Br', 1.0),
@@ -33,31 +33,31 @@ st.title("🧪 Clean Multi-Block ICP-OES Calculator")
 
 # --- 1. DATA INPUT ---
 st.header("1. Paste Data")
-raw_pasted_text = st.text_area("Paste your Excel data here:", height=200, 
-                              placeholder="Sample\t\tAl 167.078\t...\ntap water\t\t1.234\t...")
+raw_pasted_text = st.text_area("Paste your Excel data here:", height=200)
 
 def parse_and_merge_blocks(text):
-    # Split the paste into sections whenever the word "Sample" appears
-    raw_blocks = re.split(r'(?i)Sample', text)
-    master_dict = {} # {sample_name: {element_col: value}}
+    # Split text into blocks where "Sample" starts the line (case insensitive)
+    raw_blocks = re.split(r'(?mi)^Sample', text)
+    master_dict = {} 
     
     for block in raw_blocks:
         if not block.strip(): continue
         
-        # Build a temporary CSV string
+        # Load block CSV safely
         clean_block = "Sample" + block.strip()
         df = pd.read_csv(io.StringIO(clean_block), sep='\t').dropna(axis=1, how='all')
         
-        # Safety: Force the first column to be named 'Sample'
-        df.columns = ['Sample'] + list(df.columns[1:])
+        # Standardize: Rename first column to 'Sample' without shifting data
+        df = df.rename(columns={df.columns[0]: 'Sample'})
         
-        # Clean: Remove Unit rows (mg/l), literal "Sample" text, and "Control"
+        # Clean: Remove Unit rows (mg/l), literal "Sample" text, and empty entries
         df = df[df['Sample'].notna()]
         df = df[~df['Sample'].astype(str).str.lower().str.contains('mg/l|sample|control|unit', na=False)]
         
         # Map element values to the sample name
         for _, row in df.iterrows():
             s_name = str(row['Sample']).strip()
+            if not s_name: continue
             if s_name not in master_dict:
                 master_dict[s_name] = {}
             for col in df.columns:
@@ -65,7 +65,6 @@ def parse_and_merge_blocks(text):
                     master_dict[s_name][col] = row[col]
                     
     if not master_dict: return None
-    # Convert dictionary back to a single flat DataFrame
     return pd.DataFrame.from_dict(master_dict, orient='index').rename_axis('Sample').reset_index()
 
 if raw_pasted_text:
@@ -88,12 +87,14 @@ if raw_pasted_text:
 
             # --- 2. PER-SAMPLE PREPARATION ---
             st.subheader("2. Sample Preparation & Parameters")
+            
+            # Restored Dilution Detection Logic
             def get_auto_dil(name):
-                m = re.search(r'(\d+)\s?[xX]', str(name))
-                return float(m.group(1)) if m else 1.0
+                # Catches "10x", "10 x", "10X"
+                match = re.search(r'(\d+)\s?[xX]', str(name))
+                return float(match.group(1)) if match else 1.0
 
             s_list = df_full['Sample'].unique()
-            # Default Vol 500mL, Mass 0.5g
             p_df = pd.DataFrame({
                 'Sample': s_list, 
                 'Mass (g)': 0.5, 
@@ -113,7 +114,7 @@ if raw_pasted_text:
 
             # --- 4. MEASUREMENT NOTES ---
             st.subheader("4. Measurement Notes")
-            user_notes = st.text_area("Notes for the final report:", "Multi-wavelength verification performed.")
+            user_notes = st.text_area("Notes for the final report:", "Multi-block analysis.")
 
             # --- 5. CALCULATIONS ---
             results, sd_details, h_res, h_sd = [], [], {}, {}
@@ -128,7 +129,7 @@ if raw_pasted_text:
                     if len(vals) > 0:
                         av, sd = np.mean(vals), np.std(vals) if len(vals) > 1 else 0.0
                         f = (pm['Vol (mL)']/1000) * pm['Dilution'] / (pm['Mass (g)'] * 1000)
-                        perc, sd_perc = (av * f) * 100, (std_v * f) if 'std_v' in locals() else (sd * f) * 100
+                        perc, sd_perc = (av * f) * 100, (sd * f) * 100
                         
                         label = elem
                         if modes[elem] == "Oxide":
@@ -149,7 +150,6 @@ if raw_pasted_text:
             with t1:
                 df_f = pd.DataFrame(results)
                 st.dataframe(df_f.style.format(precision=3).apply(lambda r: [h_res.get((r.Sample, c), '') for c in r.index], axis=1), use_container_width=True)
-                st.info("💡 **Yellow**: Includes < or >. **Orange**: High deviation (>10%) between wavelengths.")
             with t2:
                 st.dataframe(pd.DataFrame(sd_details).style.format(precision=4).apply(lambda r: [h_sd.get((r.Sample, c), '') for c in r.index], axis=1), use_container_width=True)
             with t3:
@@ -162,7 +162,7 @@ if raw_pasted_text:
                     c2.plotly_chart(px.pie(values=[r_row['Total (%)'], unk], names=['Measured', 'Unknown'], title="Mass Balance"), key=f"p2_{i}")
 
             full_csv = f"NOTES: {user_notes}\n\n" + df_f.to_csv(index=False)
-            st.download_button("Download Report", full_csv, "icp_final.csv", "text/csv")
+            st.download_button("Download Report", full_csv, "icp_report.csv", "text/csv")
     except Exception as e:
         st.error(f"Processing Error: {e}")
 
