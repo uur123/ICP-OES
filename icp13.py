@@ -146,7 +146,7 @@ if raw_data:
 st.divider()
 st.subheader("📝 Method & Developer Information")
 st.markdown("""
-**Sample Prep:** Dried, milled, and acid-digested (Aqua Regia). Diluted in volumetric flasks.  
-**Measurement:** ICP-OES with multi-wavelength verification and matrix-matched standards.
-""")
-st.info(f"**Developer:** [Your Name](https://linkedin.com)")
+#**Sample Prep:** Dried, milled, and acid-digested (Aqua Regia). Diluted in volumetric flasks.  
+#**Measurement:** ICP-OES with multi-wavelength verification and matrix-matched standards.
+#""")
+#st.info(f"**Developer:** [Your Name](https://linkedin.com)")
