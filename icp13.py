@@ -29,7 +29,7 @@ element_to_oxide = {
 }
 
 st.set_page_config(page_title="ICP-OES Smart Calculator", layout="wide")
-st.title("🧪 Custom ICP-OES Result Calculator")
+st.title("🧪 Automatic ICP-OES Result Calculator")
 
 # --- STEP 1: PASTE DATA ---
 st.header("1. Data Input")
@@ -61,7 +61,7 @@ if raw_data:
                 df_filtered[col] = pd.to_numeric(df_filtered[col], errors='coerce')
 
         # PER-SAMPLE PREP TABLE (Includes Mass, Volume, Moisture, LOI)
-        st.subheader("2. Per-Sample Preparation & Dilution")
+        st.subheader("2. Sample Details")
         def get_auto_dilution(name):
             match = re.search(r'(\d+)[xX]', str(name))
             return float(match.group(1)) if match else 1.0
