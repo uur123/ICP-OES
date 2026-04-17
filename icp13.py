@@ -35,47 +35,49 @@ st.title("🧪 Clean Multi-Block ICP-OES Calculator")
 st.header("1. Paste Data")
 raw_pasted_text = st.text_area("Paste your Excel data here (Include 'Sample' headers):", height=200)
 
-def parse_and_merge_blocks(text):
-    # Split text into blocks where "Sample" starts
-    raw_blocks = re.split(r'(?mi)^Sample', text)
-    master_dict = {} 
-    
-    for block in raw_blocks:
+def parse_manual(text):
+    """Parses text manually to avoid pandas alignment issues with empty/shifted columns."""
+    blocks = re.split(r'(?mi)^Sample', text)
+    master_data = {}
+
+    for block in blocks:
         if not block.strip(): continue
+        lines = [line.strip().split('\t') for line in block.strip().split('\n') if line.strip()]
+        if not lines: continue
         
-        # Load block CSV safely, ensuring we treat the first line as a header
-        clean_block = "Sample" + block.strip()
-        df = pd.read_csv(io.StringIO(clean_block), sep='\t')
+        # Line 0 is the header (e.g., Fe 238.1, Al 167.0)
+        headers = lines[0]
         
-        # Ensure the first column is explicitly named 'Sample'
-        df.columns = ['Sample'] + list(df.columns[1:])
-        
-        # Filter out metadata and unit rows
-        df = df[df['Sample'].notna()]
-        df = df[~df['Sample'].astype(str).str.lower().str.contains('mg/l|sample|control|unit|avg|sd', na=False)]
-        
-        # Map element values to the sample name
-        for _, row in df.iterrows():
-            s_name = str(row['Sample']).strip()
-            if not s_name: continue
-            if s_name not in master_dict:
-                master_dict[s_name] = {}
-            for col in df.columns:
-                if col != 'Sample':
-                    val = row[col]
-                    # Only update if the value is not already there or if current value is NaN
-                    if col not in master_dict[s_name] or pd.isna(master_dict[s_name][col]):
-                        master_dict[s_name][col] = val
-                    
-    if not master_dict: return None
-    return pd.DataFrame.from_dict(master_dict, orient='index').rename_axis('Sample').reset_index()
+        # Process every row after the header
+        for row in lines[1:]:
+            if not row: continue
+            
+            # The FIRST item is always the Sample Name
+            s_name = row[0].strip()
+            
+            # Skip noise rows (Units, Averages, SDs)
+            if any(x in s_name.lower() for x in ['mg/l', 'avg', 'sd', 'unit', 'control']):
+                continue
+                
+            if s_name not in master_data:
+                master_data[s_name] = {}
+            
+            # Match values to headers starting from index 1
+            for i in range(1, len(row)):
+                if i < len(headers):
+                    col_name = headers[i].strip()
+                    if col_name:
+                        master_data[s_name][col_name] = row[i]
+    
+    if not master_data: return None
+    return pd.DataFrame.from_dict(master_data, orient='index').rename_axis('Sample').reset_index()
 
 if raw_pasted_text:
     try:
-        df_full = parse_and_merge_blocks(raw_pasted_text)
+        df_full = parse_manual(raw_pasted_text)
         
         if df_full is not None:
-            # Numeric cleaning
+            # Numeric cleaning for < and > symbols
             limit_flags = []
             for col in df_full.columns:
                 if col != 'Sample':
@@ -88,19 +90,14 @@ if raw_pasted_text:
                     df_full[col] = df_full.apply(lambda r: clean_numeric(r[col], r['Sample'], col), axis=1)
                     df_full[col] = pd.to_numeric(df_full[col], errors='coerce')
 
-            # --- 2. PER-SAMPLE PREPARATION ---
+            # --- 2. PER-SAMPLE PARAMETERS ---
             st.subheader("2. Sample Preparation & Parameters")
-            
-            def get_auto_dil(name):
-                match = re.search(r'(\d+)\s?[xX]', str(name))
-                return float(match.group(1)) if match else 1.0
-
             s_list = df_full['Sample'].unique()
             p_df = pd.DataFrame({
                 'Sample': s_list, 
                 'Mass (g)': 0.5, 
                 'Vol (mL)': 500.0, 
-                'Dilution': [get_auto_dil(s) for s in s_list], 
+                'Dilution': 1.0, 
                 'Moisture (%)': 0.0, 
                 'LOI (%)': 0.0
             })
@@ -108,52 +105,45 @@ if raw_pasted_text:
             p_map = e_prep.set_index('Sample').to_dict('index')
 
             # --- 3. ELEMENT CONFIG ---
-            # Detect elements based on column names (e.g., "Fe 238.1")
             detected = sorted(list(set([e for e in element_to_oxide.keys() for c in df_full.columns if c.strip().startswith(f"{e} ")])))
-            
             st.subheader("3. Select Oxide/Elemental Mode")
             if detected:
                 c_modes = st.columns(min(len(detected), 10))
                 modes = {e: c_modes[i % 10].radio(f"**{e}**", ["Elem", "Oxide"], key=f"m_{e}") for i, e in enumerate(detected)}
             else:
-                st.warning("No standard elements detected in column headers.")
+                st.warning("No standard elements detected. Check your column headers.")
 
             # --- 5. CALCULATIONS ---
-            results, sd_details = [], []
+            results = []
             for _, row in df_full.iterrows():
                 sn = row['Sample']
                 pm = p_map.get(sn, {'Mass (g)':0.5, 'Vol (mL)':500.0, 'Dilution':1.0, 'Moisture (%)':0.0, 'LOI (%)':0.0})
-                res, sd_res, total_measured = {"Sample": sn}, {"Sample": sn}, 0.0
+                res, total_measured = {"Sample": sn}, 0.0
 
                 for elem in detected:
                     m_cols = [c for c in df_full.columns if c.strip().startswith(f"{elem} ")]
                     vals = row[m_cols].dropna().values
                     if len(vals) > 0:
-                        av, sd = np.mean(vals), np.std(vals) if len(vals) > 1 else 0.0
-                        # Conversion Factor: (mg/L * L) / (g * 1000) -> mg_metal / mg_sample
+                        av = np.mean(vals)
                         f = (pm['Vol (mL)']/1000) * pm['Dilution'] / (pm['Mass (g)'] * 1000)
-                        perc, sd_perc = (av * f) * 100, (sd * f) * 100
+                        perc = (av * f) * 100
                         
                         label = elem
                         if modes[elem] == "Oxide":
                             form, factor = element_to_oxide[elem]
-                            perc, sd_perc, label = perc * factor, sd_perc * factor, form
+                            perc, label = perc * factor, form
                         
-                        res[f"{label} (%)"] = perc
-                        sd_res[f"{label} SD"] = sd_perc
+                        res[f"{label} (%)"] = round(perc, 4)
                         total_measured += perc
 
-                res.update({"Moisture (%)": pm['Moisture (%)'], "LOI (%)": pm['LOI (%)'], "Total (%)": total_measured + pm['Moisture (%)'] + pm['LOI (%)']})
+                res.update({"Moisture (%)": pm['Moisture (%)'], "LOI (%)": pm['LOI (%)'], "Total (%)": round(total_measured + pm['Moisture (%)'] + pm['LOI (%)'], 3)})
                 results.append(res)
-                sd_details.append(sd_res)
 
             # --- 6. DISPLAY ---
-            st.header("5. Analysis Results")
+            st.header("4. Analysis Results")
             df_res = pd.DataFrame(results)
             st.dataframe(df_res, use_container_width=True)
-            
-            csv = df_res.to_csv(index=False).encode('utf-8')
-            st.download_button("Download CSV", csv, "icp_results.csv", "text/csv")
+            st.download_button("Download CSV", df_res.to_csv(index=False).encode('utf-8'), "results.csv", "text/csv")
 
     except Exception as e:
-        st.error(f"Error processing data: {e}")
+        st.error(f"Error parsing data. Please check your paste format. Details: {e}")
