@@ -31,7 +31,7 @@ st.title("🧪 Automatic ICP-OES Calculator")
 
 with st.sidebar:
     st.header("1. Sample Preparation")
-    vol = st.number_input("Solution Volume (mL)", min_value=0.0, value=250.0, step=50)
+    vol = st.number_input("Solution Volume (mL)", min_value=0.0, value=250.0, step=50.0)
     mass_g = st.number_input("Sample Mass (g)", min_value=0.0, value=0.5, step=0.01)
     st.header("2. Additional Data")
     moist = st.number_input("Moisture (%)", min_value=0.0, step=0.1)
