@@ -5,7 +5,7 @@ import numpy as np
 import plotly.express as px
 import re
 
-# Extended oxide conversion dictionary (B to U)
+# Element to oxide conversion dictionary (B to U)
 element_to_oxide = {
     'Ag': ('Ag2O', 1.0741), 'Al': ('Al2O3', 1.8895), 'As': ('As2O3', 1.3203), 'Au': ('Au2O3', 1.1218),
     'B': ('B2O3', 3.2199), 'Ba': ('BaO', 1.1165), 'Bi': ('Bi2O3', 1.1148), 'Br': ('Br', 1.0),
@@ -28,24 +28,26 @@ element_to_oxide = {
     'Zn': ('ZnO', 1.2448), 'Zr': ('ZrO2', 1.3508)
 }
 
-st.set_page_config(page_title="ICP-OES Smart Calculator", layout="wide")
+st.set_page_config(page_title="ICP-OES Result Calculator", layout="wide")
 st.title("🧪 Custom ICP-OES Result Calculator")
 
 # --- DATA INPUT ---
 st.header("1. Data Input")
-raw_data = st.text_area("Paste Excel data (headers + unit row):", height=150)
+raw_data = st.text_area("Paste Excel data here (headers + unit row):", height=150)
 
 if raw_data:
     try:
+        # Load and handle empty columns
         df_input = pd.read_csv(io.StringIO(raw_data), sep='\t').dropna(axis=1, how='all')
         
-        # Unit row removal
+        # FIXED: Correct Unit row removal logic
         if not df_input.empty:
-            if df_input.iloc.astype(str).str.lower().str.contains('mg/l').any():
+            # Check only the first data row (index 0) for mg/l
+            first_data_row = df_input.iloc[0].astype(str).str.lower()
+            if first_data_row.str.contains('mg/l').any():
                 df_input = df_input.iloc[1:].reset_index(drop=True)
 
-        # ADVANCED ROW FILTERING
-        # Skip: Empty names, "Control", "Sample" literal, or purely whitespace rows
+        # SANITIZATION: Skip empty names, "Control", "Sample" labels, or blank rows
         df_filtered = df_input.copy()
         df_filtered = df_filtered[df_filtered['Sample'].notna()]
         df_filtered = df_filtered[df_filtered['Sample'].str.strip() != ""]
@@ -64,7 +66,7 @@ if raw_data:
                 df_filtered[col] = df_filtered.apply(lambda r: clean_tag(r[col], r['Sample'], col), axis=1)
                 df_filtered[col] = pd.to_numeric(df_filtered[col], errors='coerce')
 
-        # PER-SAMPLE PARAMETERS (Mass/Vol default updated)
+        # 2. PER-SAMPLE PARAMETERS (New Defaults: 0.5g Mass / 500mL Vol)
         st.subheader("2. Sample Preparation & Parameters")
         def auto_dil(name):
             match = re.search(r'(\d+)[xX]', str(name))
@@ -83,15 +85,15 @@ if raw_data:
         edited_prep = st.data_editor(prep_df, hide_index=True, use_container_width=True)
         p_map = edited_prep.set_index('Sample').to_dict('index')
 
-        # ELEMENT FORMATTING
+        # 3. ELEMENT FORMATTING (Alphabetic)
         detected = sorted([e for e in element_to_oxide.keys() if any(c.strip().startswith(f"{e} ") for c in df_filtered.columns)])
         st.subheader("3. Element Display Configuration")
         config_cols = st.columns(min(len(detected), 8) if detected else 1)
         modes = {e: config_cols[i % 8].radio(f"**{e}**", ["Elem", "Oxide"], key=f"m_{e}") for i, e in enumerate(detected)}
 
-        # NOTES
+        # 4. MEASUREMENT NOTES
         st.subheader("4. Measurement Notes")
-        user_notes = st.text_area("Observations for final report:", "Verified via multi-wavelength averaging.")
+        user_notes = st.text_area("Observations for final report:", "Verified via wavelength averaging.")
 
         # CALCULATIONS
         results, sd_details, h_res, h_sd = [], [], {}, {}
@@ -116,6 +118,7 @@ if raw_data:
                     sd_res[f"{label} SD"] = sd_perc
                     measured_total += perc
                     
+                    # Highlight logic
                     if any((s, c) in limit_flags for c in m_cols): h_res[(s, f"{label} (%)")] = 'background-color: #ffffb3'
                     if perc > 0 and (sd_perc / perc) > 0.10:
                         h_res[(s, f"{label} (%)")] = 'background-color: #ffcc99'
@@ -124,26 +127,26 @@ if raw_data:
             res.update({"Moisture (%)": p['Moisture (%)'], "LOI (%)": p['LOI (%)'], "Total (%)": measured_total + p['Moisture (%)'] + p['LOI (%)']})
             results.append(res); sd_details.append(sd_res)
 
-        # DISPLAY
-        st.header("5. Analysis & Visualization")
-        t1, t2, t3 = st.tabs(["📊 Results", "📏 Verification (SD)", "🥧 Composition Charts"])
+        # 5. DISPLAY & VISUALIZATION
+        t1, t2, t3 = st.tabs(["📊 Results", "📏 Verification (SD)", "🥧 Charts"])
         
         with t1:
             df_final = pd.DataFrame(results)
             st.dataframe(df_final.style.format(precision=3).apply(lambda r: [h_res.get((r.Sample, c), '') for c in r.index], axis=1), use_container_width=True)
-            st.info("💡 **Yellow**: Det. Limit symbol detected. **Orange**: High wavelength deviation (>10%).")
+            st.info("💡 **Yellow**: Det. Limit symbol found. **Orange**: High deviation (>10%).")
         
         with t2:
             st.dataframe(pd.DataFrame(sd_details).style.format(precision=4).apply(lambda r: [h_sd.get((r.Sample, c), '') for c in r.index], axis=1), use_container_width=True)
 
         with t3:
             for r_item in results:
-                st.write(f"### Sample Analysis: {r_item['Sample']}")
+                st.write(f"### Sample: {r_item['Sample']}")
                 c1, c2 = st.columns(2)
+                # Chart 1: Component Breakdown
                 breakdown = {k: v for k, v in r_item.items() if k not in ['Sample', 'Total (%)']}
                 if sum(breakdown.values()) > 0:
                     c1.plotly_chart(px.pie(values=list(breakdown.values()), names=list(breakdown.keys()), title="Internal Composition"), use_container_width=True)
-                
+                # Chart 2: Balance to 100
                 unknown = max(0, 100 - r_item['Total (%)'])
                 balance = {"Measured": r_item['Total (%)'], "Unknown": unknown}
                 c2.plotly_chart(px.pie(values=list(balance.values()), names=list(balance.keys()), title="Balance to 100%"), use_container_width=True)
