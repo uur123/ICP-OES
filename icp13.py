@@ -3,7 +3,7 @@ import pandas as pd
 import io
 import numpy as np
 
-# Element to oxide conversion dictionary with formulas
+# Oxide conversion dictionary
 element_to_oxide = {
     'Na': ('Na2O', 1.348), 'Mg': ('MgO', 1.6583), 'Al': ('Al2O3', 1.8895),
     'Si': ('SiO2', 2.1393), 'P': ('P2O5', 2.291), 'S': ('SO3', 2.499),
@@ -15,112 +15,103 @@ element_to_oxide = {
 }
 
 st.set_page_config(page_title="ICP-OES Result Calculator", layout="wide")
-st.title("🧪 Smart ICP-OES Result Calculator")
+st.title("🧪 Advanced ICP-OES Calculator")
 
-# --- SIDEBAR ---
+# --- SIDEBAR: GLOBAL PREP ---
 with st.sidebar:
     st.header("1. Sample Preparation")
     volume = st.number_input("Solution Volume (mL)", min_value=0.0, value=50.0, step=0.1)
     initial_mass_g = st.number_input("Sample Mass (g)", min_value=0.0, value=0.1, step=0.01)
-    dilution_factor = st.number_input("Dilution Factor", min_value=1.0, value=1.0, step=0.1, help="Multiply by this factor if sample was diluted.")
-    initial_mass_mg = initial_mass_g * 1000 
-    
     st.header("2. Additional Data")
-    moisture = st.number_input("Moisture Content (%)", min_value=0.0, step=0.1)
-    loi = st.number_input("Loss on Ignition (LOI) (%)", min_value=0.0, step=0.1)
+    moisture = st.number_input("Moisture (%)", min_value=0.0, step=0.1)
+    loi = st.number_input("LOI (%)", min_value=0.0, step=0.1)
 
-# --- DATA PASTE ---
-st.header("3. Paste ICP-OES Data")
-raw_data = st.text_area("Paste Excel data here (Include headers and mg/l row):", height=150)
+# --- STEP 1: PASTE DATA ---
+st.header("3. Paste Data")
+raw_data = st.text_area("Paste Excel data (headers + mg/l row):", height=150)
 
 if raw_data:
     try:
-        df_input = pd.read_csv(io.StringIO(raw_data), sep='\t')
-        
-        # Flagging detection limit symbols (< or >)
-        # We track which sample/element pairs need a warning
-        warning_cells = []
-
-        # Remove unit row (mg/l) if present
+        # Load and clean unit row
+        df_input = pd.read_csv(io.StringIO(raw_data), sep='\t').dropna(axis=1, how='all')
         if df_input.iloc[0].astype(str).str.contains('mg/l', case=False).any():
-            unit_row = df_input.iloc[0]
             df_input = df_input.iloc[1:].reset_index(drop=True)
 
-        def clean_and_flag(val, sample_name, col_name):
-            if isinstance(val, str) and ('>' in val or '<' in val):
-                warning_cells.append((sample_name, col_name))
-                return val.replace('>', '').replace('<', '').strip()
+        # 4. FLAG DETECTION LIMITS & CLEAN
+        limit_flags = []
+        def clean_val(val, sample, col):
+            if isinstance(val, str) and any(s in val for s in ['<', '>']):
+                limit_flags.append((sample, col))
+                return val.replace('<', '').replace('>', '').strip()
             return val
 
-        # Clean all numeric columns
         for col in df_input.columns:
             if col != 'Sample':
-                df_input[col] = df_input.apply(lambda row: clean_and_flag(row[col], row['Sample'], col), axis=1)
+                df_input[col] = df_input.apply(lambda r: clean_val(r[col], r['Sample'], col), axis=1)
                 df_input[col] = pd.to_numeric(df_input[col], errors='coerce')
 
-        # Detect elements
-        detected_elements = [e for e in element_to_oxide.keys() if any(c.strip().startswith(f"{e} ") for c in df_input.columns)]
+        # 5. DILUTION FACTORS PER SAMPLE
+        st.header("4. Per-Sample Dilution Factors")
+        samples = df_input['Sample'].unique()
+        dil_df = pd.DataFrame({'Sample': samples, 'Dilution Factor': [1.0] * len(samples)})
+        edited_dil = st.data_editor(dil_df, use_container_width=False, hide_index=True)
+        dil_map = dict(zip(edited_dil['Sample'], edited_dil['Dilution Factor']))
 
-        if detected_elements:
-            st.header("4. Configure Display")
-            config_cols = st.columns(len(detected_elements))
-            element_modes = {}
-            for i, elem in enumerate(detected_elements):
-                with config_cols[i]:
-                    element_modes[elem] = st.radio(f"**{elem}**", ["Elem", "Oxide"], key=f"mode_{elem}")
+        # 6. CONFIGURE ELEMENTS
+        detected = [e for e in element_to_oxide.keys() if any(c.strip().startswith(f"{e} ") for c in df_input.columns)]
+        st.header("5. Configure Display")
+        config_cols = st.columns(len(detected))
+        element_modes = {e: config_cols[i].radio(f"**{e}**", ["Elem", "Oxide"], key=f"m_{e}") for i, e in enumerate(detected)}
 
-            # Calculations
-            results_list = []
-            highlight_map = {} # To store which final cells to highlight
+        # 7. CALCULATE
+        final_results = []
+        highlight_coords = {} # (sample, col_name) -> bool
 
-            for idx, row in df_input.iterrows():
-                sample_name = str(row['Sample'])
-                res = {"Sample": sample_name}
-                total_row_perc = 0.0
+        for _, row in df_input.iterrows():
+            s_name = row['Sample']
+            s_dil = dil_map.get(s_name, 1.0)
+            res = {"Sample": s_name}
+            row_total = 0.0
+
+            for elem in detected:
+                m_cols = [c for c in df_input.columns if c.strip().startswith(f"{elem} ")]
+                vals = row[m_cols].dropna().values
                 
-                for elem in detected_elements:
-                    matching_cols = [c for c in df_input.columns if c.strip().startswith(f"{elem} ")]
-                    vals = row[matching_cols].dropna().values
+                if len(vals) > 0:
+                    avg_mg_l = np.mean(vals)
+                    std_mg_l = np.std(vals) if len(vals) > 1 else 0.0
                     
-                    if len(vals) > 0:
-                        # Calculation with Dilution Factor
-                        avg_mg_l = np.mean(vals)
-                        perc_elem = (avg_mg_l * (volume / 1000) * dilution_factor / initial_mass_mg) * 100
-                        
-                        formula_label = elem
-                        if element_modes[elem] == "Oxide":
-                            formula, factor = element_to_oxide[elem]
-                            val = perc_elem * factor
-                            formula_label = formula
-                        else:
-                            val = perc_elem
-                        
-                        col_key = f"{formula_label} (%)"
-                        res[col_key] = val
-                        total_row_perc += val
+                    # (mg/L * L * Dilution) / mg_mass * 100
+                    mass_mg = initial_mass_g * 1000
+                    perc = (avg_mg_l * (volume/1000) * s_dil / mass_mg) * 100
+                    sd_perc = (std_mg_l * (volume/1000) * s_dil / mass_mg) * 100
+                    
+                    label = elem
+                    if element_modes[elem] == "Oxide":
+                        formula, factor = element_to_oxide[elem]
+                        perc *= factor
+                        sd_perc *= factor
+                        label = formula
 
-                        # Check if any original column for this element had a < or >
-                        if any((sample_name, c) in warning_cells for c in matching_cols):
-                            highlight_map[(sample_name, col_key)] = True
+                    res[f"{label} (%)"] = perc
+                    res[f"{label} SD"] = sd_perc
+                    row_total += perc
+                    
+                    if any((s_name, c) in limit_flags for c in m_cols):
+                        highlight_coords[(s_name, f"{label} (%)")] = True
 
-                res["Moisture (%)"] = moisture
-                res["LOI (%)"] = loi
-                res["Total (%)"] = total_row_perc + moisture + loi
-                results_list.append(res)
+            res.update({"Moisture (%)": moisture, "LOI (%)": loi, "Total (%)": row_total + moisture + loi})
+            final_results.append(res)
 
-            # --- DISPLAY WITH HIGHLIGHTING ---
-            st.header("5. Final Results")
-            df_results = pd.DataFrame(results_list)
+        # DISPLAY
+        st.header("6. Results")
+        df_final = pd.DataFrame(final_results)
+        
+        def apply_styles(s):
+            return ['background-color: #ffffb3' if (s.Sample, col) in highlight_coords else '' for col in s.index]
 
-            def highlight_limits(s):
-                return ['background-color: #ffffb3' if (s.Sample, col) in highlight_map else '' for col in s.index]
+        st.dataframe(df_final.style.format(precision=3).apply(apply_styles, axis=1), use_container_width=True)
+        st.info("💡 **Yellow cells** indicate original data contained `<` or `>`. **SD columns** show variation between wavelengths.")
 
-            st.dataframe(df_results.style.format(precision=3).apply(highlight_limits, axis=1), use_container_width=True)
-            st.info("💡 **Yellow cells** indicate that the original data contained detection limit symbols (< or >).")
-            
-            csv = df_results.to_csv(index=False).encode('utf-8')
-            st.download_button("Download CSV Report", csv, "icp_report.csv", "text/csv")
     except Exception as e:
         st.error(f"Error: {e}")
-else:
-    st.info("Paste your data to start. The 'mg/l' row and detection symbols will be handled automatically.")
