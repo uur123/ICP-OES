@@ -3,7 +3,7 @@ import pandas as pd
 import io
 import numpy as np
 
-# Element to oxide conversion dictionary
+# Oxide conversion dictionary
 element_to_oxide = {
     'Na': ('Na2O', 1.348), 'Mg': ('MgO', 1.6583), 'Al': ('Al2O3', 1.8895),
     'Si': ('SiO2', 2.1393), 'P': ('P2O5', 2.291), 'S': ('SO3', 2.499),
@@ -32,11 +32,16 @@ raw_data = st.text_area("Paste Excel data (headers + mg/l row):", height=150)
 
 if raw_data:
     try:
+        # Load and handle empty columns
         df_input = pd.read_csv(io.StringIO(raw_data), sep='\t').dropna(axis=1, how='all')
-        if df_input.iloc.astype(str).str.contains('mg/l', case=False).any():
-            df_input = df_input.iloc[1:].reset_index(drop=True)
+        
+        # FIXED: Check if the first row contains unit indicators
+        if not df_input.empty:
+            first_row_str = df_input.iloc[0].astype(str).str.lower()
+            if first_row_str.str.contains('mg/l').any() or first_row_str.str.contains('unit').any():
+                df_input = df_input.iloc[1:].reset_index(drop=True)
 
-        # Flag detection limits (< or >)
+        # Flag detection limits (< or >) and clean
         limit_flags = []
         def clean_val(val, sample, col):
             if isinstance(val, str) and any(s in val for s in ['<', '>']):
@@ -65,7 +70,7 @@ if raw_data:
         # Calculations
         final_results = []
         sd_details = []
-        highlight_coords = {} # Stores styles
+        highlight_coords = {} 
 
         for _, row in df_input.iterrows():
             s_name = row['Sample']
@@ -97,12 +102,9 @@ if raw_data:
                     sd_res[f"{label} SD"] = sd_val
                     row_total += perc
                     
-                    # HIGHLIGHT LOGIC
                     coord_key = (s_name, f"{label} (%)")
-                    # Yellow: Detection limit symbol found
                     if any((s_name, c) in limit_flags for c in m_cols):
                         highlight_coords[coord_key] = 'background-color: #ffffb3'
-                    # Orange: High Deviation (SD > 10% of measurement)
                     if perc > 0 and (sd_val / perc) > 0.10:
                         highlight_coords[coord_key] = 'background-color: #ffcc99'
 
@@ -118,10 +120,8 @@ if raw_data:
             return [highlight_coords.get((s.Sample, col), '') for col in s.index]
 
         st.dataframe(df_final.style.format(precision=3).apply(apply_highlights, axis=1), use_container_width=True)
-        
-        st.info("💡 **Yellow**: Includes < or > values. **Orange**: High variation between wavelengths (check SD).")
+        st.info("💡 **Yellow**: Includes < or > values. **Orange**: High variation (>10%) between wavelengths.")
 
-        # HIDDEN SD TABLE
         with st.expander("See Standard Deviation (SD) Details"):
             st.dataframe(pd.DataFrame(sd_details).style.format(precision=4), use_container_width=True)
 
@@ -129,4 +129,4 @@ if raw_data:
         st.download_button("Download CSV Report", csv, "icp_report.csv", "text/csv")
 
     except Exception as e:
-        st.error(f"Error: {e}")
+        st.error(f"Processing Error: {e}")
