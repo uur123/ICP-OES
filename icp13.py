@@ -27,12 +27,12 @@ element_to_oxide = {
 }
 
 st.set_page_config(page_title="ICP-OES Result Calculator", layout="wide")
-st.title("🧪 Advanced ICP-OES Calculator (B-U)")
+st.title("🧪 Automatic ICP-OES Calculator")
 
 with st.sidebar:
     st.header("1. Sample Preparation")
-    vol = st.number_input("Solution Volume (mL)", min_value=0.0, value=50.0, step=0.1)
-    mass_g = st.number_input("Sample Mass (g)", min_value=0.0, value=0.1, step=0.01)
+    vol = st.number_input("Solution Volume (mL)", min_value=0.0, value=250.0, step=50)
+    mass_g = st.number_input("Sample Mass (g)", min_value=0.0, value=0.5, step=0.01)
     st.header("2. Additional Data")
     moist = st.number_input("Moisture (%)", min_value=0.0, step=0.1)
     loi_val = st.number_input("LOI (%)", min_value=0.0, step=0.1)
@@ -70,7 +70,7 @@ if raw_data:
 
         detected = sorted([e for e in element_to_oxide.keys() if any(c.strip().startswith(f"{e} ") for c in df_input.columns)])
         
-        st.header("5. Configure Display (Alphabetic)")
+        st.header("5. Configure Display (Alphabetic Order)")
         config_cols = st.columns(min(len(detected), 10) if detected else 1)
         element_modes = {e: config_cols[i % 10].radio(f"**{e}**", ["Elem", "Oxide"], key=f"m_{e}") for i, e in enumerate(detected)}
 
@@ -102,7 +102,7 @@ if raw_data:
             res.update({"Moisture (%)": moist, "LOI (%)": loi_val, "Total (%)": row_total + moist + loi_val})
             results.append(res); sd_details.append(sd_res)
 
-        st.header("6. Analysis View")
+        st.header("6. Analysis Results")
         tab1, tab2 = st.tabs(["Main Percentages", "SD Details"])
         
         with tab1:
