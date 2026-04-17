@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import io
 import numpy as np
-import plotly.express as px
 import re
 
 # Element to oxide conversion dictionary
@@ -33,117 +32,83 @@ st.title("🧪 Clean Multi-Block ICP-OES Calculator")
 
 # --- 1. DATA INPUT ---
 st.header("1. Paste Data")
-raw_pasted_text = st.text_area("Paste your Excel data here (Include 'Sample' headers):", height=200)
+raw_pasted_text = st.text_area("Paste your Excel data here:", height=200)
 
 def parse_manual(text):
-    """Parses text manually to avoid pandas alignment issues with empty/shifted columns."""
     blocks = re.split(r'(?mi)^Sample', text)
     master_data = {}
-
     for block in blocks:
         if not block.strip(): continue
-        lines = [line.strip().split('\t') for line in block.strip().split('\n') if line.strip()]
-        if not lines: continue
-        
-        # Line 0 is the header (e.g., Fe 238.1, Al 167.0)
-        headers = lines[0]
-        
-        # Process every row after the header
+        lines = [line.split('\t') for line in block.strip().split('\n') if line.strip()]
+        headers = [h.strip() for h in lines[0]]
         for row in lines[1:]:
-            if not row: continue
-            
-            # The FIRST item is always the Sample Name
             s_name = row[0].strip()
-            
-            # Skip noise rows (Units, Averages, SDs)
-            if any(x in s_name.lower() for x in ['mg/l', 'avg', 'sd', 'unit', 'control']):
-                continue
-                
-            if s_name not in master_data:
-                master_data[s_name] = {}
-            
-            # Match values to headers starting from index 1
+            if not s_name or any(x in s_name.lower() for x in ['mg/l', 'avg', 'sd', 'unit']): continue
+            if s_name not in master_data: master_data[s_name] = {}
             for i in range(1, len(row)):
                 if i < len(headers):
-                    col_name = headers[i].strip()
-                    if col_name:
-                        master_data[s_name][col_name] = row[i]
-    
+                    master_data[s_name][headers[i]] = row[i]
     if not master_data: return None
     return pd.DataFrame.from_dict(master_data, orient='index').rename_axis('Sample').reset_index()
 
 if raw_pasted_text:
-    try:
-        df_full = parse_manual(raw_pasted_text)
+    df_full = parse_manual(raw_pasted_text)
+    if df_full is not None:
+        for col in df_full.columns:
+            if col != 'Sample':
+                df_full[col] = pd.to_numeric(df_full[col].astype(str).str.replace('<','').str.replace('>',''), errors='coerce')
+
+        # --- 2. DILUTION LOGIC ---
+        st.subheader("2. Sample Preparation & Parameters")
         
-        if df_full is not None:
-            # Numeric cleaning for < and > symbols
-            limit_flags = []
-            for col in df_full.columns:
-                if col != 'Sample':
-                    def clean_numeric(val, sample, cname):
-                        s = str(val)
-                        if any(x in s for x in ['<', '>']):
-                            limit_flags.append((sample, cname))
-                            return s.replace('<', '').replace('>', '').strip()
-                        return val
-                    df_full[col] = df_full.apply(lambda r: clean_numeric(r[col], r['Sample'], col), axis=1)
-                    df_full[col] = pd.to_numeric(df_full[col], errors='coerce')
+        def extract_dilution(name):
+            # Matches: 10x, x10, 10 X, X 10
+            match = re.search(r'(\d+)\s*[xX]|[xX]\s*(\d+)', str(name))
+            if match:
+                return float(match.group(1) or match.group(2))
+            return 1.0
 
-            # --- 2. PER-SAMPLE PARAMETERS ---
-            st.subheader("2. Sample Preparation & Parameters")
-            s_list = df_full['Sample'].unique()
-            p_df = pd.DataFrame({
-                'Sample': s_list, 
-                'Mass (g)': 0.5, 
-                'Vol (mL)': 500.0, 
-                'Dilution': 1.0, 
-                'Moisture (%)': 0.0, 
-                'LOI (%)': 0.0
-            })
-            e_prep = st.data_editor(p_df, hide_index=True, use_container_width=True)
-            p_map = e_prep.set_index('Sample').to_dict('index')
+        s_list = df_full['Sample'].unique()
+        p_df = pd.DataFrame({
+            'Sample': s_list, 
+            'Mass (g)': 0.5, 
+            'Vol (mL)': 500.0, 
+            'Dilution': [extract_dilution(s) for s in s_list], 
+            'Moisture (%)': 0.0, 'LOI (%)': 0.0
+        })
+        e_prep = st.data_editor(p_df, hide_index=True, use_container_width=True)
+        p_map = e_prep.set_index('Sample').to_dict('index')
 
-            # --- 3. ELEMENT CONFIG ---
-            detected = sorted(list(set([e for e in element_to_oxide.keys() for c in df_full.columns if c.strip().startswith(f"{e} ")])))
-            st.subheader("3. Select Oxide/Elemental Mode")
-            if detected:
-                c_modes = st.columns(min(len(detected), 10))
-                modes = {e: c_modes[i % 10].radio(f"**{e}**", ["Elem", "Oxide"], key=f"m_{e}") for i, e in enumerate(detected)}
-            else:
-                st.warning("No standard elements detected. Check your column headers.")
+        # --- 3. ELEMENT CONFIG ---
+        detected = sorted(list(set([e for e in element_to_oxide.keys() for c in df_full.columns if c.strip().startswith(f"{e} ")])))
+        st.subheader("3. Select Mode")
+        modes = {}
+        if detected:
+            cols = st.columns(min(len(detected), 8))
+            for i, e in enumerate(detected):
+                modes[e] = cols[i % 8].radio(f"**{e}**", ["Elem", "Oxide"], key=f"m_{e}")
 
-            # --- 5. CALCULATIONS ---
-            results = []
-            for _, row in df_full.iterrows():
-                sn = row['Sample']
-                pm = p_map.get(sn, {'Mass (g)':0.5, 'Vol (mL)':500.0, 'Dilution':1.0, 'Moisture (%)':0.0, 'LOI (%)':0.0})
-                res, total_measured = {"Sample": sn}, 0.0
+        # --- 4. CALCULATIONS ---
+        results = []
+        for _, row in df_full.iterrows():
+            sn = row['Sample']
+            pm = p_map[sn]
+            res, total = {"Sample": sn}, 0.0
+            for elem in detected:
+                m_cols = [c for c in df_full.columns if c.strip().startswith(f"{elem} ")]
+                val = row[m_cols].mean()
+                if not np.isnan(val):
+                    # Calculation: (mg/L * Volume_L * Dilution) / (Mass_g * 1000) * 100%
+                    factor = (pm['Vol (mL)']/1000 * pm['Dilution']) / (pm['Mass (g)'] * 1000)
+                    perc = val * factor * 100
+                    if modes[elem] == "Oxide":
+                        perc *= element_to_oxide[elem][1]
+                        res[f"{element_to_oxide[elem][0]} (%)"] = round(perc, 4)
+                    else:
+                        res[f"{elem} (%)"] = round(perc, 4)
+                    total += perc
+            res.update({"Moisture (%)": pm['Moisture (%)'], "LOI (%)": pm['LOI (%)'], "Total (%)": round(total + pm['Moisture (%)'] + pm['LOI (%)'], 3)})
+            results.append(res)
 
-                for elem in detected:
-                    m_cols = [c for c in df_full.columns if c.strip().startswith(f"{elem} ")]
-                    vals = row[m_cols].dropna().values
-                    if len(vals) > 0:
-                        av = np.mean(vals)
-                        f = (pm['Vol (mL)']/1000) * pm['Dilution'] / (pm['Mass (g)'] * 1000)
-                        perc = (av * f) * 100
-                        
-                        label = elem
-                        if modes[elem] == "Oxide":
-                            form, factor = element_to_oxide[elem]
-                            perc, label = perc * factor, form
-                        
-                        res[f"{label} (%)"] = round(perc, 4)
-                        total_measured += perc
-
-                res.update({"Moisture (%)": pm['Moisture (%)'], "LOI (%)": pm['LOI (%)'], "Total (%)": round(total_measured + pm['Moisture (%)'] + pm['LOI (%)'], 3)})
-                results.append(res)
-
-            # --- 6. DISPLAY ---
-            st.header("4. Analysis Results")
-            df_res = pd.DataFrame(results)
-            st.dataframe(df_res, use_container_width=True)
-            st.download_button("Download CSV", df_res.to_csv(index=False).encode('utf-8'), "results.csv", "text/csv")
-
-    except Exception as e:
-        st.error(f"Error parsing data. Please check your paste format. Details: {e}")
+        st.header("4. Results")
+        st.dataframe(pd.DataFrame(results), use_container_width=True)
