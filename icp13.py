@@ -2,8 +2,10 @@ import streamlit as st
 import pandas as pd
 import io
 import numpy as np
+import plotly.express as px
+import re
 
-# Dictionary for element to oxide conversion (Boron to Uranium)
+# Element to oxide conversion dictionary (B to U)
 element_to_oxide = {
     'Ag': ('Ag2O', 1.0741), 'Al': ('Al2O3', 1.8895), 'As': ('As2O3', 1.3203), 'Au': ('Au2O3', 1.1218),
     'B': ('B2O3', 3.2199), 'Ba': ('BaO', 1.1165), 'Bi': ('Bi2O3', 1.1148), 'Br': ('Br', 1.0),
@@ -27,72 +29,91 @@ element_to_oxide = {
 }
 
 st.set_page_config(page_title="ICP-OES Result Calculator", layout="wide")
-st.title("🧪 Automatic ICP-OES Calculator")
 
+# --- SIDEBAR ---
 with st.sidebar:
-    st.header("1. Sample Preparation")
-    vol = st.number_input("Solution Volume (mL)", min_value=0.0, value=250.0, step=50.0)
-    mass_g = st.number_input("Sample Mass (g)", min_value=0.0, value=0.5, step=0.01)
-    st.header("2. Additional Data")
-    moist = st.number_input("Moisture (%)", min_value=0.0, step=0.1)
-    loi_val = st.number_input("LOI (%)", min_value=0.0, step=0.1)
+    st.header("1. Default Global Parameters")
+    def_vol = st.number_input("Default Volume (mL)", min_value=0.0, value=50.0)
+    def_mass = st.number_input("Default Mass (g)", min_value=0.0, value=0.1)
+    st.divider()
+    st.header("2. Additional Matrix Data")
+    moist = st.number_input("Moisture (%)", min_value=0.0)
+    loi_val = st.number_input("LOI (%)", min_value=0.0)
 
-st.header("3. Paste Data")
-raw_data = st.text_area("Paste Excel data (headers + units row):", height=150)
+st.title("🧪 Advanced ICP-OES Result Calculator")
+
+# --- DATA PASTE ---
+st.header("3. Data Input")
+raw_data = st.text_area("Paste Excel data (including headers and units row):", height=150)
 
 if raw_data:
     try:
         df_input = pd.read_csv(io.StringIO(raw_data), sep='\t').dropna(axis=1, how='all')
         
-        # Clean unit row if it exists
+        # Unit row removal
         if not df_input.empty:
-            is_unit_row = df_input.iloc[0].astype(str).str.lower().str.contains('mg/l').any()
-            if is_unit_row:
+            first_row_str = df_input.iloc[0].astype(str).str.lower()
+            if any(first_row_str.str.contains('mg/l')):
                 df_input = df_input.iloc[1:].reset_index(drop=True)
 
+        # SKIP CONTROL ROWS
+        df_filtered = df_input[~df_input['Sample'].str.contains('Control', case=False, na=False)].copy()
+
+        # Clean detection symbols and parse numbers
         limit_flags = []
-        def clean_val(val, sample, col):
-            if isinstance(val, str) and any(s in val for s in ['<', '>']):
-                limit_flags.append((sample, col))
-                return val.replace('<', '').replace('>', '').strip()
-            return val
-
-        for col in df_input.columns:
+        for col in df_filtered.columns:
             if col != 'Sample':
-                df_input[col] = df_input.apply(lambda r: clean_val(r[col], r['Sample'], col), axis=1)
-                df_input[col] = pd.to_numeric(df_input[col], errors='coerce')
+                def clean_and_tag(val, sample, cname):
+                    if isinstance(val, str) and any(s in val for s in ['<', '>']):
+                        limit_flags.append((sample, cname))
+                        return val.replace('<', '').replace('>', '').strip()
+                    return val
+                df_filtered[col] = df_filtered.apply(lambda r: clean_and_tag(r[col], r['Sample'], col), axis=1)
+                df_filtered[col] = pd.to_numeric(df_filtered[col], errors='coerce')
 
-        st.header("4. Per-Sample Dilution Factors")
-        samples = df_input['Sample'].unique()
-        dil_df = pd.DataFrame({'Sample': samples, 'Dilution Factor': [1.0] * len(samples)})
-        edited_dil = st.data_editor(dil_df, hide_index=True)
-        dil_map = dict(zip(edited_dil['Sample'], edited_dil['Dilution Factor']))
-
-        detected = sorted([e for e in element_to_oxide.keys() if any(c.strip().startswith(f"{e} ") for c in df_input.columns)])
+        # AUTO-DILUTION & PARAMETER EDITOR
+        st.subheader("4. Per-Sample Dilution & Prep")
         
-        st.header("5. Configure Display (Alphabetic Order)")
-        config_cols = st.columns(min(len(detected), 10) if detected else 1)
-        element_modes = {e: config_cols[i % 10].radio(f"**{e}**", ["Elem", "Oxide"], key=f"m_{e}") for i, e in enumerate(detected)}
+        def get_auto_dilution(name):
+            match = re.search(r'(\d+)[xX]', str(name))
+            return float(match.group(1)) if match else 1.0
 
+        prep_df = pd.DataFrame({
+            'Sample': df_filtered['Sample'].unique(),
+            'Mass (g)': [def_mass] * len(df_filtered['Sample'].unique()),
+            'Volume (mL)': [def_vol] * len(df_filtered['Sample'].unique()),
+            'Dilution': [get_auto_dilution(s) for s in df_filtered['Sample'].unique()]
+        })
+        
+        edited_prep = st.data_editor(prep_df, hide_index=True)
+        prep_map = edited_prep.set_index('Sample').to_dict('index')
+
+        # Element Configuration
+        detected = sorted([e for e in element_to_oxide.keys() if any(c.strip().startswith(f"{e} ") for c in df_filtered.columns)])
+        st.subheader("5. Output Configuration")
+        config_cols = st.columns(min(len(detected), 8) if detected else 1)
+        element_modes = {e: config_cols[i % 8].radio(f"**{e}**", ["Elem", "Oxide"], key=f"m_{e}") for i, e in enumerate(detected)}
+
+        # PROCESS RESULTS
         results, sd_details, highlights = [], [], {}
-
-        for _, row in df_input.iterrows():
-            s_name, s_dil = row['Sample'], dil_map.get(row['Sample'], 1.0)
+        for _, row in df_filtered.iterrows():
+            s_name = row['Sample']
+            p = prep_map.get(s_name, {'Mass (g)': def_mass, 'Volume (mL)': def_vol, 'Dilution': 1.0})
             res, sd_res, row_total = {"Sample": s_name}, {"Sample": s_name}, 0.0
 
             for elem in detected:
-                m_cols = [c for c in df_input.columns if c.strip().startswith(f"{elem} ")]
+                m_cols = [c for c in df_filtered.columns if c.strip().startswith(f"{elem} ")]
                 vals = row[m_cols].dropna().values
                 
                 if len(vals) > 0:
                     avg_v, std_v = np.mean(vals), np.std(vals) if len(vals) > 1 else 0.0
-                    factor_base = (vol/1000) * s_dil / (mass_g * 1000)
-                    perc, sd_perc = (avg_v * factor_base) * 100, (std_v * factor_base) * 100
+                    factor = (p['Volume (mL)']/1000) * p['Dilution'] / (p['Mass (g)'] * 1000)
+                    perc, sd_perc = (avg_v * factor) * 100, (std_v * factor) * 100
                     
                     label = elem
                     if element_modes[elem] == "Oxide":
-                        formula, factor = element_to_oxide[elem]
-                        perc, sd_perc, label = perc * factor, sd_perc * factor, formula
+                        formula, f_ox = element_to_oxide[elem]
+                        perc, sd_perc, label = perc * f_ox, sd_perc * f_ox, formula
 
                     res[f"{label} (%)"], sd_res[f"{label} SD"], row_total = perc, sd_perc, row_total + perc
                     key = (s_name, f"{label} (%)")
@@ -102,18 +123,30 @@ if raw_data:
             res.update({"Moisture (%)": moist, "LOI (%)": loi_val, "Total (%)": row_total + moist + loi_val})
             results.append(res); sd_details.append(sd_res)
 
-        st.header("6. Analysis Results")
-        tab1, tab2 = st.tabs(["Main Percentages", "SD Details"])
+        # Analysis Views
+        st.header("6. Analysis View")
+        tab1, tab2, tab3 = st.tabs(["📊 Results", "📏 SD Details", "🥧 Charts"])
         
         with tab1:
             df_final = pd.DataFrame(results)
             st.dataframe(df_final.style.format(precision=3).apply(lambda s: [highlights.get((s.Sample, c), '') for c in s.index], axis=1), use_container_width=True)
-            st.info("💡 **Yellow**: Includes < or >. **Orange**: High wavelength variation (>10%).")
+            st.info("💡 **Yellow**: Near detection limit. **Orange**: High deviation (>10%).")
         
         with tab2:
             st.dataframe(pd.DataFrame(sd_details).style.format(precision=4), use_container_width=True)
 
-        st.download_button("Download CSV", df_final.to_csv(index=False).encode('utf-8'), "icp_report.csv", "text/csv")
+        with tab3:
+            for row_data in results:
+                pie_data = {k: v for k, v in row_data.items() if k not in ['Sample', 'Total (%)']}
+                st.plotly_chart(px.pie(values=list(pie_data.values()), names=list(pie_data.keys()), title=f"Sample: {row_data['Sample']}"), use_container_width=True)
 
     except Exception as e:
-        st.error(f"Processing Error: {e}")
+        st.error(f"Error: {e}")
+
+st.divider()
+st.subheader("📝 Method & Developer Information")
+st.markdown("""
+**Sample Prep:** Dried, milled, and acid-digested (Aqua Regia). Diluted in volumetric flasks.  
+**Measurement:** ICP-OES with multi-wavelength verification and matrix-matched standards.
+""")
+st.info(f"**Developer:** [Your Name](https://linkedin.com)")
