@@ -33,8 +33,8 @@ st.set_page_config(page_title="ICP-OES Result Calculator", layout="wide")
 # --- SIDEBAR ---
 with st.sidebar:
     st.header("1. Default Global Parameters")
-    def_vol = st.number_input("Default Volume (mL)", min_value=0.0, value=50.0)
-    def_mass = st.number_input("Default Mass (g)", min_value=0.0, value=0.1)
+    def_vol = st.number_input("Default Volume (mL)", min_value=0.0, value=250.0)
+    def_mass = st.number_input("Default Mass (g)", min_value=0.0, value=0.3)
     st.divider()
     st.header("2. Additional Matrix Data")
     moist = st.number_input("Moisture (%)", min_value=0.0)
@@ -144,8 +144,8 @@ if raw_data:
         st.error(f"Error: {e}")
 
 st.divider()
-st.subheader("📝 Method & Developer Information")
-st.markdown("""
+#st.subheader("📝 Method & Developer Information")
+#st.markdown("""
 #**Sample Prep:** Dried, milled, and acid-digested (Aqua Regia). Diluted in volumetric flasks.  
 #**Measurement:** ICP-OES with multi-wavelength verification and matrix-matched standards.
 #""")
