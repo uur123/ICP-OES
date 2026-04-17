@@ -5,7 +5,7 @@ import numpy as np
 import plotly.express as px
 import re
 
-# Oxide conversion dictionary (B to U)
+# Extended oxide conversion dictionary (B to U)
 element_to_oxide = {
     'Ag': ('Ag2O', 1.0741), 'Al': ('Al2O3', 1.8895), 'As': ('As2O3', 1.3203), 'Au': ('Au2O3', 1.1218),
     'B': ('B2O3', 3.2199), 'Ba': ('BaO', 1.1165), 'Bi': ('Bi2O3', 1.1148), 'Br': ('Br', 1.0),
@@ -28,138 +28,128 @@ element_to_oxide = {
     'Zn': ('ZnO', 1.2448), 'Zr': ('ZrO2', 1.3508)
 }
 
-st.set_page_config(page_title="ICP-OES Smart Calculator", layout="wide")
-st.title("🧪 Multi-Block ICP-OES Result Calculator")
+st.set_page_config(page_title="ICP-OES Result Calculator", layout="wide")
+st.title("🧪 Clean Multi-Block ICP-OES Calculator")
 
-# --- 1. DATA INPUT ---
-st.header("1. Data Input")
-raw_data = st.text_area("Paste Excel data here (Multiple 'Sample' blocks supported):", height=200)
+# --- 1. CLEANER AND INPUT ---
+st.header("1. Clean Data Input")
+raw_pasted_text = st.text_area("Paste your multi-block Excel data here:", height=200)
 
-if raw_data:
+def clean_and_parse(text):
+    # Split the raw text into blocks based on "Sample"
+    # This regex looks for "Sample" at the start of a line
+    sections = re.split(r'(?m)^Sample\s*', text)
+    processed_dfs = []
+    
+    for section in sections:
+        if not section.strip(): continue
+        
+        # Build valid CSV string
+        clean_section = "Sample\t" + section.strip()
+        f = io.StringIO(clean_section)
+        
+        # Load block (tab or space)
+        df = pd.read_csv(f, sep='\t').dropna(axis=1, how='all')
+        
+        # Remove unit row (mg/l)
+        if not df.empty:
+            is_unit_row = df.iloc[0].astype(str).str.lower().str.contains('mg/l').any()
+            if is_unit_row:
+                df = df.iloc[1:].reset_index(drop=True)
+        
+        # Final formatting
+        df['Sample'] = df['Sample'].astype(str).str.strip()
+        processed_dfs.append(df.set_index('Sample'))
+
+    # Merge all blocks using the Sample index
+    if not processed_dfs: return None
+    merged = pd.concat(processed_dfs, axis=1)
+    return merged.reset_index()
+
+if raw_pasted_text:
     try:
-        # Split by keyword 'Sample' (case sensitive based on your screenshot)
-        sections = [s.strip() for s in re.split(r'(?m)^Sample', raw_data) if s.strip()]
-        dfs_to_merge = []
-
-        for section in sections:
-            full_sec = "Sample\t" + section
-            df_temp = pd.read_csv(io.StringIO(full_sec), sep=None, engine='python').dropna(axis=1, how='all')
-            
-            if not df_temp.empty:
-                # Remove mg/l unit row
-                if df_temp.iloc[0].astype(str).str.lower().str.contains('mg/l').any():
-                    df_temp = df_temp.iloc[1:].reset_index(drop=True)
-                
-                # Standardize Sample Column and set as index
-                df_temp.columns = [c.strip() for c in df_temp.columns]
-                df_temp['Sample'] = df_temp['Sample'].astype(str).str.strip()
-                dfs_to_merge.append(df_temp.set_index('Sample'))
-
-        # Combine tables: concat joins on index (Sample names)
-        if dfs_to_merge:
-            df_merged = pd.concat(dfs_to_merge, axis=1)
-            # Remove any duplicate column names if a wavelength was pasted twice
-            df_merged = df_merged.loc[:, ~df_merged.columns.duplicated()]
-            df_final_input = df_merged.reset_index()
-        else:
-            st.error("No valid data sections found. Ensure each block starts with 'Sample'.")
-            st.stop()
-
-        # FILTER: Skip Control, Sample, or empty labels
-        df_filtered = df_final_input[df_final_input['Sample'].notna()].copy()
-        df_filtered = df_filtered[~df_filtered['Sample'].str.lower().isin(['sample', 'control', 'nan', ''])]
-        df_filtered = df_filtered[~df_filtered['Sample'].str.contains('Control', case=False, na=False)]
-
-        # Numeric cleaning & tagging limit symbols
-        limit_flags = []
-        for col in df_filtered.columns:
-            if col != 'Sample':
-                def clean_tag(val, sample, cname):
-                    if isinstance(val, str) and any(s in val for s in ['<', '>']):
-                        limit_flags.append((sample, cname))
-                        return val.replace('<', '').replace('>', '').strip()
-                    return val
-                df_filtered[col] = df_filtered.apply(lambda r: clean_tag(r[col], r['Sample'], col), axis=1)
-                df_filtered[col] = pd.to_numeric(df_filtered[col], errors='coerce')
-
-        # --- 2. PER-SAMPLE PARAMETERS ---
-        st.subheader("2. Sample Preparation & Parameters")
-        def auto_dil(name):
-            match = re.search(r'(\d+)\s?[xX]', str(name))
-            return float(match.group(1)) if match else 1.0
-
-        samples = df_filtered['Sample'].unique()
-        prep_df = pd.DataFrame({
-            'Sample': samples, 'Mass (g)': [0.5]*len(samples), 'Vol (mL)': [500.0]*len(samples),
-            'Dilution': [auto_dil(s) for s in samples], 'Moist (%)': [0.0]*len(samples), 'LOI (%)': [0.0]*len(samples)
-        })
-        edited_prep = st.data_editor(prep_df, hide_index=True, use_container_width=True)
-        p_map = edited_prep.set_index('Sample').to_dict('index')
-
-        # --- 3. ELEMENT CONFIG ---
-        detected = sorted([e for e in element_to_oxide.keys() if any(c.strip().startswith(f"{e} ") for c in df_filtered.columns)])
-        st.subheader("3. Select Oxide/Elemental Display")
-        config_cols = st.columns(min(len(detected), 10) if detected else 1)
-        modes = {e: config_cols[i % 10].radio(f"**{e}**", ["Elem", "Oxide"], key=f"m_{e}") for i, e in enumerate(detected)}
-
-        # --- CALCULATIONS ---
-        results, sd_details, h_res, h_sd = [], [], {}, {}
-        for _, row in df_filtered.iterrows():
-            s = row['Sample']
-            p = p_map.get(s, {'Mass (g)':0.5, 'Vol (mL)':500.0, 'Dilution':1.0, 'Moist (%)':0.0, 'LOI (%)':0.0})
-            res, sd_res, measured_total = {"Sample": s}, {"Sample": s}, 0.0
-
-            for elem in detected:
-                m_cols = [c for c in df_filtered.columns if c.strip().startswith(f"{elem} ")]
-                vals = row[m_cols].dropna().values
-                if len(vals) > 0:
-                    avg_v, std_v = np.mean(vals), np.std(vals) if len(vals) > 1 else 0.0
-                    f = (p['Vol (mL)']/1000) * p['Dilution'] / (p['Mass (g)'] * 1000)
-                    perc, sd_perc = (avg_v * f) * 100, (std_v * f) * 100
-                    
-                    label = elem
-                    if modes[elem] == "Oxide":
-                        formula, factor = element_to_oxide[elem]
-                        perc, sd_perc, label = perc * factor, sd_perc * factor, formula
-                    
-                    res[f"{label} (%)"] = perc
-                    sd_res[f"{label} SD"] = sd_perc
-                    measured_total += perc
-                    if any((s, c) in limit_flags for c in m_cols): h_res[(s, f"{label} (%)")] = 'background-color: #ffffb3'
-                    if perc > 0 and (sd_perc / perc) > 0.10: 
-                        h_res[(s, f"{label} (%)")] = 'background-color: #ffcc99'
-                        h_sd[(s, f"{label} SD")] = 'background-color: #ff9999'
-
-            res.update({"Moisture (%)": p['Moist (%)'], "LOI (%)": p['LOI (%)'], "Total (%)": measured_total + p['Moist (%)'] + p['LOI (%)']})
-            results.append(res); sd_details.append(sd_res)
-
-        # --- 4. DISPLAY ---
-        st.header("4. Results Analysis")
-        t1, t2, t3 = st.tabs(["📊 Results", "📏 SD Verification", "🥧 Charts"])
+        df_full = clean_and_parse(raw_pasted_text)
         
-        with t1:
-            df_final = pd.DataFrame(results)
-            st.dataframe(df_final.style.format(precision=3).apply(lambda r: [h_res.get((r.Sample, c), '') for c in r.index], axis=1), use_container_width=True)
-        
-        with t2:
-            st.dataframe(pd.DataFrame(sd_details).style.format(precision=4).apply(lambda r: [h_sd.get((r.Sample, c), '') for c in r.index], axis=1), use_container_width=True)
+        if df_full is not None:
+            # Filter rows (Skip "Sample", "Control", and blanks)
+            df_filtered = df_full[~df_full['Sample'].str.lower().isin(['sample', 'control', 'nan', ''])].copy()
+            df_filtered = df_filtered[~df_filtered['Sample'].str.contains('Control', case=False, na=False)]
 
-        with t3:
-            for i, item in enumerate(results):
-                st.write(f"### {item['Sample']}")
-                c1, c2 = st.columns(2)
-                comp = {k: v for k, v in item.items() if k not in ['Sample', 'Total (%)']}
-                if sum(comp.values()) > 0:
-                    c1.plotly_chart(px.pie(values=list(comp.values()), names=list(comp.keys()), title="Measured Breakdown"), use_container_width=True, key=f"p1_{i}")
-                    unk = max(0, 100 - item['Total (%)'])
-                    c2.plotly_chart(px.pie(values=[item['Total (%)'], unk], names=['Measured', 'Unknown'], title="Mass Balance"), use_container_width=True, key=f"p2_{i}")
+            # Clean numerics and flag < / >
+            limit_flags = []
+            for col in df_filtered.columns:
+                if col != 'Sample':
+                    def clean_numeric(val, sample, cname):
+                        if isinstance(val, str) and any(s in val for s in ['<', '>']):
+                            limit_flags.append((sample, cname))
+                            return val.replace('<', '').replace('>', '').strip()
+                        return val
+                    df_filtered[col] = df_filtered.apply(lambda r: clean_numeric(r[col], r['Sample'], col), axis=1)
+                    df_filtered[col] = pd.to_numeric(df_filtered[col], errors='coerce')
 
-        st.download_button("Download Report", df_final.to_csv(index=False).encode('utf-8'), "icp_final.csv", "text/csv")
+            # --- 2. PER-SAMPLE PARAMETERS ---
+            st.subheader("2. Sample Preparation")
+            def auto_dil(name):
+                m = re.search(r'(\d+)\s?[xX]', str(name))
+                return float(m.group(1)) if m else 1.0
 
+            s_list = df_filtered['Sample'].unique()
+            p_df = pd.DataFrame({'Sample': s_list, 'Mass (g)': 0.5, 'Vol (mL)': 500.0, 'Dilution': [auto_dil(s) for s in s_list], 'Moisture (%)': 0.0, 'LOI (%)': 0.0})
+            e_prep = st.data_editor(p_df, hide_index=True)
+            p_map = e_prep.set_index('Sample').to_dict('index')
+
+            # --- 3. ELEMENT CONFIG ---
+            detected = sorted([e for e in element_to_oxide.keys() if any(c.strip().startswith(f"{e} ") for c in df_filtered.columns)])
+            st.subheader("3. Element Display Mode")
+            c_modes = st.columns(min(len(detected), 10) if detected else 1)
+            modes = {e: c_modes[i % 10].radio(f"**{e}**", ["Elem", "Oxide"], key=f"m_{e}") for i, e in enumerate(detected)}
+
+            # --- CALCS ---
+            results, sd_details, h_res, h_sd = [], [], {}, {}
+            for _, row in df_filtered.iterrows():
+                sn = row['Sample']
+                pm = p_map.get(sn, {'Mass (g)':0.5, 'Vol (mL)':500.0, 'Dilution':1.0, 'Moisture (%)':0.0, 'LOI (%)':0.0})
+                res, sd_res, total_measured = {"Sample": sn}, {"Sample": sn}, 0.0
+
+                for elem in detected:
+                    m_cols = [c for c in df_filtered.columns if c.strip().startswith(f"{elem} ")]
+                    vals = row[m_cols].dropna().values
+                    if len(vals) > 0:
+                        av, sd = np.mean(vals), np.std(vals) if len(vals) > 1 else 0.0
+                        f = (pm['Vol (mL)']/1000) * pm['Dilution'] / (pm['Mass (g)'] * 1000)
+                        perc, sd_perc = (av * f) * 100, (sd * f) * 100
+                        label = elem
+                        if modes[elem] == "Oxide":
+                            form, factor = element_to_oxide[elem]
+                            perc, sd_perc, label = perc * factor, sd_perc * factor, form
+                        
+                        res[f"{label} (%)"], sd_res[f"{label} SD"], total_measured = perc, sd_perc, total_measured + perc
+                        if any((sn, c) in limit_flags for c in m_cols): h_res[(sn, f"{label} (%)")] = 'background-color: #ffffb3'
+                        if perc > 0 and (sd_perc / perc) > 0.10: 
+                            h_res[(sn, f"{label} (%)")] = 'background-color: #ffcc99'; h_sd[(sn, f"{label} SD")] = 'background-color: #ff9999'
+
+                res.update({"Moisture (%)": pm['Moisture (%)'], "LOI (%)": pm['LOI (%)'], "Total (%)": total_measured + pm['Moisture (%)'] + pm['LOI (%)']})
+                results.append(res); sd_details.append(sd_res)
+
+            # --- DISPLAY ---
+            st.header("4. Results Analysis")
+            t1, t2, t3 = st.tabs(["📊 Main Results", "📏 SD Verification", "🥧 Pie Charts"])
+            with t1:
+                df_f = pd.DataFrame(results)
+                st.dataframe(df_f.style.format(precision=3).apply(lambda r: [h_res.get((r.Sample, c), '') for c in r.index], axis=1), use_container_width=True)
+            with t2:
+                st.dataframe(pd.DataFrame(sd_details).style.format(precision=4).apply(lambda r: [h_sd.get((r.Sample, c), '') for c in r.index], axis=1), use_container_width=True)
+            with t3:
+                for idx, row in enumerate(results):
+                    st.write(f"### {row['Sample']}")
+                    c1, c2 = st.columns(2)
+                    bk = {k: v for k, v in row.items() if k not in ['Sample', 'Total (%)']}
+                    c1.plotly_chart(px.pie(values=list(bk.values()), names=list(bk.keys()), title="Measured Breakdown"), key=f"p1_{idx}")
+                    unk = max(0, 100 - row['Total (%)'])
+                    c2.plotly_chart(px.pie(values=[row['Total (%)'], unk], names=['Measured', 'Unknown'], title="Mass Balance"), key=f"p2_{idx}")
+
+            st.download_button("Download CSV", df_f.to_csv(index=False).encode('utf-8'), "icp_report.csv", "text/csv")
     except Exception as e:
         st.error(f"Processing Error: {e}")
-        with st.expander("Debug Raw Data Merge"):
-            st.write("If you see this, the tables failed to merge. Check if 'Sample' is spelled exactly the same in each block.")
-            if 'df_final_input' in locals(): st.dataframe(df_final_input)
 
 st.info(f"**Developer:** [Your Name](https://linkedin.com)")
