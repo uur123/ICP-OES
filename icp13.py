@@ -15,101 +15,92 @@ element_to_oxide = {
 }
 
 st.set_page_config(page_title="ICP-OES Result Calculator", layout="wide")
-st.title("Enhanced ICP-OES Result Calculator")
+st.title("🧪 Smart ICP-OES Result Calculator")
 
 # --- SIDEBAR: PREP & ADDITIONAL DATA ---
 with st.sidebar:
     st.header("1. Sample Preparation")
-    volume = st.number_input("Volume of sample solution (mL)", min_value=0.0, value=50.0, step=0.1, format="%.2f")
-    initial_mass_g = st.number_input("Initial mass of sample (g)", min_value=0.0, value=0.1, step=0.01, format="%.2f")
+    volume = st.number_input("Volume of solution (mL)", min_value=0.0, value=50.0, step=0.1)
+    initial_mass_g = st.number_input("Initial mass of sample (g)", min_value=0.0, value=0.1, step=0.01)
     initial_mass_mg = initial_mass_g * 1000 
     
-    st.write("---")
     st.header("2. Additional Data")
-    moisture_content = st.number_input("Moisture Content (%)", min_value=0.0, step=0.1, format="%.2f")
-    loi = st.number_input("Loss on Ignition (LOI) (%)", min_value=0.0, step=0.1, format="%.2f")
+    moisture = st.number_input("Moisture Content (%)", min_value=0.0, step=0.1)
+    loi = st.number_input("Loss on Ignition (LOI) (%)", min_value=0.0, step=0.1)
 
-# --- ELEMENT SELECTION ---
-st.header("3. Select Elements")
-if 'selected_elements' not in st.session_state:
-    st.session_state.selected_elements = {}
+# --- STEP 1: PASTE DATA ---
+st.header("3. Paste ICP-OES Data")
+raw_data = st.text_area("Paste Excel data here (Include headers):", height=150)
 
-cols = st.columns(18)
-elements = sorted(list(element_to_oxide.keys()))
-
-for i, element in enumerate(elements):
-    with cols[i % 18]:
-        # Using checkboxes for multi-element selection from paste
-        if st.checkbox(element, key=f"check_{element}"):
-            if element not in st.session_state.selected_elements:
-                st.session_state.selected_elements[element] = "Elemental"
-        else:
-            st.session_state.selected_elements.pop(element, None)
-
-# --- DATA PASTE ---
-st.header("4. Paste Data & Calculate")
-raw_data = st.text_area("Paste Excel data here (Include headers):", height=200, 
-                        placeholder="Sample\tType\tBi 179.193\tBi 190.241...")
-
-if raw_data and st.session_state.selected_elements:
+if raw_data:
     try:
-        # Read the tab-separated data from Excel
         df_input = pd.read_csv(io.StringIO(raw_data), sep='\t')
         
-        # Clean numeric columns (handle commas if needed)
-        for col in df_input.columns:
-            if col not in ['Sample', 'Type']:
-                df_input[col] = pd.to_numeric(df_input[col].astype(str).str.replace(',', ''), errors='coerce')
+        # Auto-detect elements based on column headers
+        detected_elements = []
+        for elem in element_to_oxide.keys():
+            if any(col.startswith(f"{elem} ") for col in df_input.columns):
+                detected_elements.append(elem)
 
-        # Filter only Sample rows (ignoring Control rows)
-        df_samples = df_input[~df_input['Sample'].str.contains('Control', case=False, na=False)]
-        
-        all_results = []
-
-        for _, row in df_samples.iterrows():
-            sample_data = {"Sample": row['Sample']}
-            total_sample_percentage = 0.0
+        if not detected_elements:
+            st.warning("No matching elements from the dictionary found in data.")
+        else:
+            # --- STEP 2: DYNAMIC CONTROLS ---
+            st.header("4. Configure Elements")
+            st.write("Detected elements from your data. Choose how to display them:")
             
-            for elem in st.session_state.selected_elements:
-                # 1. Match columns for this element (e.g. "Bi 179.193", "Bi 190.241")
-                matching_cols = [c for c in df_input.columns if c.startswith(f"{elem} ")]
+            # Use columns to show toggles for detected elements
+            config_cols = st.columns(len(detected_elements))
+            element_modes = {}
+            
+            for i, elem in enumerate(detected_elements):
+                with config_cols[i]:
+                    mode = st.radio(f"**{elem}**", ["Elem", "Oxide"], key=f"mode_{elem}")
+                    element_modes[elem] = mode
+
+            # --- STEP 3: CALCULATIONS ---
+            results_list = []
+            # Filter out control/blank rows if they exist
+            df_samples = df_input[~df_input['Sample'].str.contains('Control|Blank', case=False, na=False)]
+
+            for _, row in df_samples.iterrows():
+                res = {"Sample": row['Sample']}
+                total_row_perc = 0.0
                 
-                if matching_cols:
-                    vals = row[matching_cols].dropna().values
+                for elem in detected_elements:
+                    # Find and average all wavelengths for this element
+                    matching_cols = [c for c in df_input.columns if c.startswith(f"{elem} ")]
+                    vals = pd.to_numeric(row[matching_cols], errors='coerce').dropna().values
+                    
                     if len(vals) > 0:
-                        # 2. Average and calculate %
-                        # Formula: (mg/L * L) / mg_sample * 100
                         avg_mg_l = np.mean(vals)
-                        perc_elemental = (avg_mg_l * (volume / 1000) / initial_mass_mg) * 100
+                        # mg/L -> mg in total volume -> % of total mass
+                        perc_elem = (avg_mg_l * (volume / 1000) / initial_mass_mg) * 100
                         
-                        # 3. Apply Oxide Conversion if selected (default to elemental for now)
-                        final_val = perc_elemental
-                        label = elem
-                        if st.session_state.selected_elements[elem] == "Oxide":
-                            oxide_name, factor = element_to_oxide[elem]
-                            final_val = perc_elemental * factor
-                            label = oxide_name
+                        if element_modes[elem] == "Oxide":
+                            ox_name, factor = element_to_oxide[elem]
+                            val = perc_elem * factor
+                            res[f"{ox_name} (%)"] = val
+                        else:
+                            val = perc_elem
+                            res[f"{elem} (%)"] = val
                         
-                        sample_data[f"{label} (%)"] = final_val
-                        total_sample_percentage += final_val
+                        total_row_perc += val
+                
+                # Add Moisture/LOI to total
+                res["Moisture (%)"] = moisture
+                res["LOI (%)"] = loi
+                res["Total (%)"] = total_row_perc + moisture + loi
+                results_list.append(res)
 
-            # Add Moisture and LOI
-            if moisture_content > 0: sample_data["Moisture (%)"] = moisture_content
-            if loi > 0: sample_data["LOI (%)"] = loi
-            
-            sample_data["Total (%)"] = total_sample_percentage + moisture_content + loi
-            all_results.append(sample_data)
+            st.header("5. Final Results")
+            df_results = pd.DataFrame(results_list)
+            st.dataframe(df_results.style.format(precision=3), use_container_width=True)
 
-        # Display Final Results
-        st.subheader("Calculated Results")
-        df_final = pd.DataFrame(all_results)
-        st.dataframe(df_final.style.format(precision=3))
-        
-        # Download
-        csv = df_final.to_csv(index=False).encode('utf-8')
-        st.download_button("Download CSV", csv, "results.csv", "text/csv")
+            csv = df_results.to_csv(index=False).encode('utf-8')
+            st.download_button("Download CSV Report", csv, "icp_report.csv", "text/csv")
 
     except Exception as e:
-        st.error(f"Error: {e}. Ensure you include the header row when pasting.")
+        st.error(f"Processing Error: {e}")
 else:
-    st.info("Select elements and paste your data to see the combined report.")
+    st.info("Paste your ICP-OES data (including headers) to see the analysis.")
