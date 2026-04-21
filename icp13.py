@@ -40,9 +40,12 @@ def parse_manual(text):
     for block in blocks:
         if not block.strip(): continue
         lines = [line.split('\t') for line in block.strip().split('\n') if line.strip()]
+        if not lines: continue
         headers = [h.strip() for h in lines[0]]
         for row in lines[1:]:
+            if not row: continue
             s_name = row[0].strip()
+            # Filter out utility rows
             if not s_name or any(x in s_name.lower() for x in ['mg/l', 'avg', 'sd', 'unit']): continue
             if s_name not in master_data: master_data[s_name] = {}
             for i in range(1, len(row)):
@@ -54,11 +57,12 @@ def parse_manual(text):
 if raw_pasted_text:
     df_full = parse_manual(raw_pasted_text)
     if df_full is not None:
+        # Pre-clean numeric data
         for col in df_full.columns:
             if col != 'Sample':
                 df_full[col] = pd.to_numeric(df_full[col].astype(str).str.replace('<','').str.replace('>',''), errors='coerce')
 
-        # --- 2. DILUTION LOGIC ---
+        # --- 2. PREP PARAMETERS ---
         st.subheader("2. Sample Preparation & Parameters")
         
         def extract_dilution(name):
@@ -75,17 +79,16 @@ if raw_pasted_text:
             'Dilution': [extract_dilution(s) for s in s_list], 
             'Moisture (%)': 0.0, 'LOI (%)': 0.0
         })
-        e_prep = st.data_editor(p_df, hide_index=True, use_container_width=True)
+        e_prep = st.data_editor(p_df, hide_index=True, width="stretch")
         p_map = e_prep.set_index('Sample').to_dict('index')
 
-        # --- 3. ELEMENT CONFIG ---
-        # FIXED: Use regex to detect elements even without a trailing space
+        # --- 3. ELEMENT SELECTION ---
         detected = sorted(list(set([
             e for e in element_to_oxide.keys() 
             for c in df_full.columns if re.match(rf"^{e}([^a-zA-Z]|$)", c.strip())
         ])))
         
-        st.subheader("3. Select Mode")
+        st.subheader("3. Select Reporting Mode")
         modes = {}
         if detected:
             cols = st.columns(min(len(detected), 8))
@@ -98,19 +101,26 @@ if raw_pasted_text:
             sn = row['Sample']
             pm = p_map[sn]
             res, total = {"Sample": sn}, 0.0
+            
             for elem in detected:
-                # FIXED: Use regex to match columns for the specific element
+                # Find all columns for this element (e.g., "Fe 238.1", "Fe 259.9")
                 m_cols = [c for c in df_full.columns if re.match(rf"^{elem}([^a-zA-Z]|$)", c.strip())]
+                
+                # FORCE NUMERIC MEAN (Fix for the reported error)
                 val = pd.to_numeric(row[m_cols], errors='coerce').mean()
+                
                 if not np.isnan(val):
+                    # calculation: (mg/L * Volume_L * Dilution) / (Mass_g * 1000) * 100%
                     factor = (pm['Vol (mL)']/1000 * pm['Dilution']) / (pm['Mass (g)'] * 1000)
                     perc = val * factor * 100
+                    
                     if modes[elem] == "Oxide":
                         perc *= element_to_oxide[elem][1]
                         res[f"{element_to_oxide[elem][0]} (%)"] = round(perc, 4)
                     else:
                         res[f"{elem} (%)"] = round(perc, 4)
                     total += perc
+            
             res.update({
                 "Moisture (%)": pm['Moisture (%)'], 
                 "LOI (%)": pm['LOI (%)'], 
@@ -119,4 +129,4 @@ if raw_pasted_text:
             results.append(res)
 
         st.header("4. Results")
-        st.dataframe(pd.DataFrame(results), use_container_width=True)
+        st.dataframe(pd.DataFrame(results), width="stretch")
