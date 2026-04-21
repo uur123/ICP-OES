@@ -62,7 +62,6 @@ if raw_pasted_text:
         st.subheader("2. Sample Preparation & Parameters")
         
         def extract_dilution(name):
-            # Matches: 10x, x10, 10 X, X 10
             match = re.search(r'(\d+)\s*[xX]|[xX]\s*(\d+)', str(name))
             if match:
                 return float(match.group(1) or match.group(2))
@@ -80,7 +79,12 @@ if raw_pasted_text:
         p_map = e_prep.set_index('Sample').to_dict('index')
 
         # --- 3. ELEMENT CONFIG ---
-        detected = sorted(list(set([e for e in element_to_oxide.keys() for c in df_full.columns if c.strip().startswith(f"{e} ")])))
+        # FIXED: Use regex to detect elements even without a trailing space
+        detected = sorted(list(set([
+            e for e in element_to_oxide.keys() 
+            for c in df_full.columns if re.match(rf"^{e}([^a-zA-Z]|$)", c.strip())
+        ])))
+        
         st.subheader("3. Select Mode")
         modes = {}
         if detected:
@@ -95,10 +99,10 @@ if raw_pasted_text:
             pm = p_map[sn]
             res, total = {"Sample": sn}, 0.0
             for elem in detected:
-                m_cols = [c for c in df_full.columns if c.strip().startswith(f"{elem} ")]
-                val = row[m_cols].mean()
+                # FIXED: Use regex to match columns for the specific element
+                m_cols = [c for c in df_full.columns if re.match(rf"^{elem}([^a-zA-Z]|$)", c.strip())]
+                val = pd.to_numeric(row[m_cols], errors='coerce').mean()
                 if not np.isnan(val):
-                    # Calculation: (mg/L * Volume_L * Dilution) / (Mass_g * 1000) * 100%
                     factor = (pm['Vol (mL)']/1000 * pm['Dilution']) / (pm['Mass (g)'] * 1000)
                     perc = val * factor * 100
                     if modes[elem] == "Oxide":
@@ -107,7 +111,11 @@ if raw_pasted_text:
                     else:
                         res[f"{elem} (%)"] = round(perc, 4)
                     total += perc
-            res.update({"Moisture (%)": pm['Moisture (%)'], "LOI (%)": pm['LOI (%)'], "Total (%)": round(total + pm['Moisture (%)'] + pm['LOI (%)'], 3)})
+            res.update({
+                "Moisture (%)": pm['Moisture (%)'], 
+                "LOI (%)": pm['LOI (%)'], 
+                "Total (%)": round(total + pm['Moisture (%)'] + pm['LOI (%)'], 3)
+            })
             results.append(res)
 
         st.header("4. Results")
